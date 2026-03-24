@@ -31,6 +31,7 @@
 #include "EmptyCatchCheck.h"
 #include "ExceptionCopyConstructorThrowsCheck.h"
 #include "ExceptionEscapeCheck.h"
+#include "FloatEqualComparisonCheck.h"
 #include "FloatLoopCounterCheck.h"
 #include "FoldInitTypeCheck.h"
 #include "ForwardDeclarationNamespaceCheck.h"
@@ -45,6 +46,7 @@
 #include "IntegerDivisionCheck.h"
 #include "InvalidEnumDefaultInitializationCheck.h"
 #include "LambdaFunctionNameCheck.h"
+#include "LargeStackVariableCheck.h"
 #include "MacroParenthesesCheck.h"
 #include "MacroRepeatedSideEffectsCheck.h"
 #include "MisleadingSetterOfReferenceCheck.h"
@@ -163,6 +165,8 @@ public:
         "bugprone-exception-copy-constructor-throws");
     CheckFactories.registerCheck<ExceptionEscapeCheck>(
         "bugprone-exception-escape");
+    CheckFactories.registerCheck<FloatEqualComparisonCheck>(
+        "bugprone-float-equal-comparison");
     CheckFactories.registerCheck<FloatLoopCounterCheck>(
         "bugprone-float-loop-counter");
     CheckFactories.registerCheck<FoldInitTypeCheck>("bugprone-fold-init-type");
@@ -178,6 +182,8 @@ public:
         "bugprone-incorrect-enable-if");
     CheckFactories.registerCheck<IncorrectEnableSharedFromThisCheck>(
         "bugprone-incorrect-enable-shared-from-this");
+    CheckFactories.registerCheck<LargeStackVariableCheck>(
+        "bugprone-large-stack-variable");
     CheckFactories.registerCheck<UnintendedCharOstreamOutputCheck>(
         "bugprone-unintended-char-ostream-output");
     CheckFactories.registerCheck<ReturnConstRefFromParameterCheck>(

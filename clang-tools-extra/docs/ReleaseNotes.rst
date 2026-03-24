@@ -105,6 +105,16 @@ Improvements to clang-tidy
 New checks
 ^^^^^^^^^^
 
+- New :doc:`bugprone-float-equal-comparison
+  <clang-tidy/checks/bugprone/float-equal-comparison>` check.
+
+  FIXME: Write a short description.
+
+- New :doc:`bugprone-large-stack-variable
+  <clang-tidy/checks/bugprone/large-stack-variable>` check.
+
+  FIXME: Write a short description.
+
 - New :doc:`bugprone-unsafe-to-allow-exceptions
   <clang-tidy/checks/bugprone/unsafe-to-allow-exceptions>` check.
 

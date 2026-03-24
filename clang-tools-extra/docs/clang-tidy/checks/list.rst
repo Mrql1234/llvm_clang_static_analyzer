@@ -101,6 +101,7 @@ Clang-Tidy Checks
    :doc:`bugprone-empty-catch <bugprone/empty-catch>`,
    :doc:`bugprone-exception-copy-constructor-throws <bugprone/exception-copy-constructor-throws>`,
    :doc:`bugprone-exception-escape <bugprone/exception-escape>`,
+   :doc:`bugprone-float-equal-comparison <bugprone/float-equal-comparison>`, "Yes"
    :doc:`bugprone-float-loop-counter <bugprone/float-loop-counter>`,
    :doc:`bugprone-fold-init-type <bugprone/fold-init-type>`,
    :doc:`bugprone-forward-declaration-namespace <bugprone/forward-declaration-namespace>`,
@@ -115,6 +116,7 @@ Clang-Tidy Checks
    :doc:`bugprone-integer-division <bugprone/integer-division>`,
    :doc:`bugprone-invalid-enum-default-initialization <bugprone/invalid-enum-default-initialization>`,
    :doc:`bugprone-lambda-function-name <bugprone/lambda-function-name>`,
+   :doc:`bugprone-large-stack-variable <bugprone/large-stack-variable>`,
    :doc:`bugprone-macro-parentheses <bugprone/macro-parentheses>`, "Yes"
    :doc:`bugprone-macro-repeated-side-effects <bugprone/macro-repeated-side-effects>`,
    :doc:`bugprone-misleading-setter-of-reference <bugprone/misleading-setter-of-reference>`,
@@ -241,7 +243,6 @@ Clang-Tidy Checks
    :doc:`google-runtime-int <google/runtime-int>`,
    :doc:`google-runtime-operator <google/runtime-operator>`,
    :doc:`google-upgrade-googletest-case <google/upgrade-googletest-case>`, "Yes"
-   :doc:`hicpp-exception-baseclass <hicpp/exception-baseclass>`,
    :doc:`hicpp-multiway-paths-covered <hicpp/multiway-paths-covered>`,
    :doc:`hicpp-signed-bitwise <hicpp/signed-bitwise>`,
    :doc:`linuxkernel-must-check-errs <linuxkernel/must-check-errs>`,

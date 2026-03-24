@@ -1002,6 +1002,10 @@ let ParentPackage = ENV in {
 
 let ParentPackage = SecurityAlpha in {
 
+def MathDomainChecker : Checker<"MathDomain">,
+  HelpText<"Check for math function domain errors (sqrt of negative, asin/acos out of [-1,1])">,
+  Documentation<NotDocumented>;
+
 def ReturnPointerRangeChecker : Checker<"ReturnPtrRange">,
   HelpText<"Check for an out-of-bound pointer being returned to callers">,
   Documentation<HasDocumentation>;

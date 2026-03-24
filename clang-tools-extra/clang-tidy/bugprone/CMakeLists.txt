@@ -28,6 +28,7 @@ add_clang_library(clangTidyBugproneModule STATIC
   EmptyCatchCheck.cpp
   ExceptionCopyConstructorThrowsCheck.cpp
   ExceptionEscapeCheck.cpp
+  FloatEqualComparisonCheck.cpp
   FloatLoopCounterCheck.cpp
   FoldInitTypeCheck.cpp
   ForwardDeclarationNamespaceCheck.cpp
@@ -37,6 +38,7 @@ add_clang_library(clangTidyBugproneModule STATIC
   IncorrectEnableIfCheck.cpp
   IncorrectEnableSharedFromThisCheck.cpp
   InvalidEnumDefaultInitializationCheck.cpp
+  LargeStackVariableCheck.cpp
   UnintendedCharOstreamOutputCheck.cpp
   ReturnConstRefFromParameterCheck.cpp
   StdExceptionBaseclassCheck.cpp
