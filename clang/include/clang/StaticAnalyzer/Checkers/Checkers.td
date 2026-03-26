@@ -289,6 +289,10 @@ def StdVariantChecker : Checker<"StdVariant">,
   HelpText<"Check for bad type access for std::variant.">,
   Documentation<HasDocumentation>;
 
+def PossibleDivZeroChecker : Checker<"PossibleDivideZero">,
+  HelpText<"Warn when the divisor may be zero (not proven non-zero)">,
+  Documentation<NotDocumented>;
+
 } // end "alpha.core"
 
 //===----------------------------------------------------------------------===//
@@ -1004,6 +1008,10 @@ let ParentPackage = SecurityAlpha in {
 
 def MathDomainChecker : Checker<"MathDomain">,
   HelpText<"Check for math function domain errors (sqrt of negative, asin/acos out of [-1,1])">,
+  Documentation<NotDocumented>;
+
+def PossibleArrayBoundChecker : Checker<"PossibleArrayBound">,
+  HelpText<"Warn when an array index is not proven to be within bounds">,
   Documentation<NotDocumented>;
 
 def ReturnPointerRangeChecker : Checker<"ReturnPtrRange">,

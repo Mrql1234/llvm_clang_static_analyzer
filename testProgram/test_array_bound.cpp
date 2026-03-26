@@ -4,6 +4,8 @@
 // 场景2: 负数下标 → 应报警
 // 场景3: 合法访问 → 不应报警
 
+int get_value();
+
 // 场景1: 上界越界 — 期望 security.ArrayBound 告警
 void upper_bound_overflow() {
     int arr[10];
@@ -22,6 +24,22 @@ void negative_index() {
 void legal_access() {
     int arr[10];
     arr[5] = 0; // no warning expected
+    (void)arr[0];
+}
+
+// 场景4: 通过变量导致越界
+void test_array_bound_1() {
+    int index = -1;
+    int arr[10];
+    arr[index] = 0;
+    (void)arr[0];
+}
+
+// 场景5: 通过外部输入导致越界
+void test_array_bound_2() {
+    int index = get_value();
+    int arr[10];
+    arr[index] = 0;
     (void)arr[0];
 }
 

@@ -47,6 +47,7 @@
 #include "InvalidEnumDefaultInitializationCheck.h"
 #include "LambdaFunctionNameCheck.h"
 #include "LargeStackVariableCheck.h"
+#include "MathDomainGuardCheck.h"
 #include "MacroParenthesesCheck.h"
 #include "MacroRepeatedSideEffectsCheck.h"
 #include "MisleadingSetterOfReferenceCheck.h"
@@ -184,6 +185,8 @@ public:
         "bugprone-incorrect-enable-shared-from-this");
     CheckFactories.registerCheck<LargeStackVariableCheck>(
         "bugprone-large-stack-variable");
+    CheckFactories.registerCheck<MathDomainGuardCheck>(
+        "bugprone-math-domain-guard");
     CheckFactories.registerCheck<UnintendedCharOstreamOutputCheck>(
         "bugprone-unintended-char-ostream-output");
     CheckFactories.registerCheck<ReturnConstRefFromParameterCheck>(

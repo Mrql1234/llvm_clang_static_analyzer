@@ -30,9 +30,17 @@ void safe_division() {
     (void)c;
 }
 
+// 场景4: 可能导致除零的代码，未初始化或者与外部输入导致
+void test_divide_zero() {
+    int divisor = get_value();
+    int result = 100 / divisor;
+    (void)result;
+}
+
 int main() {
     literal_divide_by_zero();
     variable_divide_by_zero();
     safe_division();
+    test_divide_zero();
     return 0;
 }

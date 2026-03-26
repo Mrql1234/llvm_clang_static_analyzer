@@ -14,13 +14,15 @@ run_csa() {
     local file="$1"
     local extra_args="$2"
     local expected_pattern="$3"
-    echo -n "CSA: $(basename $file) ... "
-    output=$($CLANG $CSA_FLAGS $extra_args "$file" 2>&1 || true)
+    local cmd="$CLANG $CSA_FLAGS $extra_args \"$file\""
+    echo "CSA: $(basename "$file")"
+    echo "  CMD: $cmd"
+    output=$(eval "$cmd" 2>&1 || true)
     if echo "$output" | grep -q "$expected_pattern"; then
-        echo "PASS"
+        echo "  RESULT: PASS"
         PASS=$((PASS + 1))
     else
-        echo "FAIL (expected pattern: $expected_pattern)"
+        echo "  RESULT: FAIL (expected pattern: $expected_pattern)"
         FAIL=$((FAIL + 1))
     fi
 }
@@ -29,13 +31,15 @@ run_tidy() {
     local file="$1"
     local check="$2"
     local expected_pattern="$3"
-    echo -n "clang-tidy: $(basename $file) [$check] ... "
-    output=$($TIDY -checks="-*,$check" "$file" -- -isysroot "$SDK_PATH" -I"$SDK_PATH/usr/include/c++/v1" 2>&1 || true)
+    local cmd="$TIDY -checks=\"-*,$check\" \"$file\" -- -isysroot \"$SDK_PATH\" -I\"$SDK_PATH/usr/include/c++/v1\""
+    echo "clang-tidy: $(basename "$file") [$check]"
+    echo "  CMD: $cmd"
+    output=$(eval "$cmd" 2>&1 || true)
     if echo "$output" | grep -q "$expected_pattern"; then
-        echo "PASS"
+        echo "  RESULT: PASS"
         PASS=$((PASS + 1))
     else
-        echo "FAIL (expected pattern: $expected_pattern)"
+        echo "  RESULT: FAIL (expected pattern: $expected_pattern)"
         FAIL=$((FAIL + 1))
     fi
 }

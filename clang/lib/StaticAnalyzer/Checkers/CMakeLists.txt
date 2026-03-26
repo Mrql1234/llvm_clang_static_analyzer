@@ -89,6 +89,8 @@ add_clang_library(clangStaticAnalyzerCheckers
   OpaqueSTLFunctionsModeling.cpp
   OSObjectCStyleCast.cpp
   PaddingChecker.cpp
+  PossibleArrayBoundChecker.cpp
+  PossibleDivZeroChecker.cpp
   PointerArithChecker.cpp
   PointerSubChecker.cpp
   PthreadLockChecker.cpp
