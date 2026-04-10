@@ -29,7 +29,10 @@ add_clang_library(clangTidyBugproneModule STATIC
   ExceptionCopyConstructorThrowsCheck.cpp
   ExceptionEscapeCheck.cpp
   FloatEqualComparisonCheck.cpp
+  FloatLiteralSuffixCheck.cpp
   FloatLoopCounterCheck.cpp
+  FloatPrecisionLossCheck.cpp
+  FloatPrecisionPromotionCheck.cpp
   FoldInitTypeCheck.cpp
   ForwardDeclarationNamespaceCheck.cpp
   ForwardingReferenceOverloadCheck.cpp
@@ -49,6 +52,7 @@ add_clang_library(clangTidyBugproneModule STATIC
   IncorrectEnableIfCheck.cpp
   IncorrectRoundingsCheck.cpp
   InfiniteLoopCheck.cpp
+  LoopExternalDependencyCheck.cpp
   IntegerDivisionCheck.cpp
   LambdaFunctionNameCheck.cpp
   MacroParenthesesCheck.cpp
@@ -106,6 +110,7 @@ add_clang_library(clangTidyBugproneModule STATIC
   TooSmallLoopVariableCheck.cpp
   UncheckedOptionalAccessCheck.cpp
   UncheckedStringToNumberConversionCheck.cpp
+  UnboundedRecursionCheck.cpp
   UndefinedMemoryManipulationCheck.cpp
   UndelegatedConstructorCheck.cpp
   UnhandledExceptionAtNewCheck.cpp

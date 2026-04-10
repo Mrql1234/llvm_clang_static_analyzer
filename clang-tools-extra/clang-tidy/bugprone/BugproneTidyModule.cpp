@@ -32,7 +32,10 @@
 #include "ExceptionCopyConstructorThrowsCheck.h"
 #include "ExceptionEscapeCheck.h"
 #include "FloatEqualComparisonCheck.h"
+#include "FloatLiteralSuffixCheck.h"
 #include "FloatLoopCounterCheck.h"
+#include "FloatPrecisionLossCheck.h"
+#include "FloatPrecisionPromotionCheck.h"
 #include "FoldInitTypeCheck.h"
 #include "ForwardDeclarationNamespaceCheck.h"
 #include "ForwardingReferenceOverloadCheck.h"
@@ -43,6 +46,7 @@
 #include "IncorrectEnableSharedFromThisCheck.h"
 #include "IncorrectRoundingsCheck.h"
 #include "InfiniteLoopCheck.h"
+#include "LoopExternalDependencyCheck.h"
 #include "IntegerDivisionCheck.h"
 #include "InvalidEnumDefaultInitializationCheck.h"
 #include "LambdaFunctionNameCheck.h"
@@ -104,6 +108,7 @@
 #include "UncheckedOptionalAccessCheck.h"
 #include "UncheckedStringToNumberConversionCheck.h"
 #include "UndefinedMemoryManipulationCheck.h"
+#include "UnboundedRecursionCheck.h"
 #include "UndelegatedConstructorCheck.h"
 #include "UnhandledExceptionAtNewCheck.h"
 #include "UnhandledSelfAssignmentCheck.h"
@@ -168,8 +173,14 @@ public:
         "bugprone-exception-escape");
     CheckFactories.registerCheck<FloatEqualComparisonCheck>(
         "bugprone-float-equal-comparison");
+    CheckFactories.registerCheck<FloatLiteralSuffixCheck>(
+        "bugprone-float-literal-suffix");
     CheckFactories.registerCheck<FloatLoopCounterCheck>(
         "bugprone-float-loop-counter");
+    CheckFactories.registerCheck<FloatPrecisionLossCheck>(
+        "bugprone-float-precision-loss");
+    CheckFactories.registerCheck<FloatPrecisionPromotionCheck>(
+        "bugprone-float-precision-promotion");
     CheckFactories.registerCheck<FoldInitTypeCheck>("bugprone-fold-init-type");
     CheckFactories.registerCheck<ForwardDeclarationNamespaceCheck>(
         "bugprone-forward-declaration-namespace");
@@ -200,6 +211,8 @@ public:
     CheckFactories.registerCheck<IncorrectRoundingsCheck>(
         "bugprone-incorrect-roundings");
     CheckFactories.registerCheck<InfiniteLoopCheck>("bugprone-infinite-loop");
+    CheckFactories.registerCheck<LoopExternalDependencyCheck>(
+        "bugprone-loop-external-dependency");
     CheckFactories.registerCheck<IntegerDivisionCheck>(
         "bugprone-integer-division");
     CheckFactories.registerCheck<InvalidEnumDefaultInitializationCheck>(
@@ -309,6 +322,8 @@ public:
         "bugprone-unchecked-string-to-number-conversion");
     CheckFactories.registerCheck<UndefinedMemoryManipulationCheck>(
         "bugprone-undefined-memory-manipulation");
+    CheckFactories.registerCheck<UnboundedRecursionCheck>(
+        "bugprone-unbounded-recursion");
     CheckFactories.registerCheck<UndelegatedConstructorCheck>(
         "bugprone-undelegated-constructor");
     CheckFactories.registerCheck<UnhandledSelfAssignmentCheck>(
