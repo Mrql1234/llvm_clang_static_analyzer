@@ -1,0 +1,12 @@
+21:c:@F@safe_divide#I#I# math_utils.cpp.ast
+23:c:@F@get_array_index#I# math_utils.cpp.ast
+27:c:@F@process_buffer#*I#I#I# math_utils.cpp.ast
+23:c:@F@compute_divisor#I# math_utils.cpp.ast
+17:c:@F@fetch_value# data_provider.cpp.ast
+17:c:@F@fetch_index# data_provider.cpp.ast
+20:c:@F@init_record#*I# data_provider.cpp.ast
+28:c:@F@defect_uninit_cross_tu# main.cpp.ast
+20:c:@F@local_get_zero# main.cpp.ast
+29:c:@F@defect_div_zero_same_tu# main.cpp.ast
+31:c:@F@defect_array_oob_cross_tu# main.cpp.ast
+30:c:@F@defect_div_zero_cross_tu# main.cpp.ast
