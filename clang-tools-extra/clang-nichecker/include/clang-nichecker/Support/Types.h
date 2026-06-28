@@ -1,7 +1,11 @@
 #ifndef LLVM_CLANG_TOOLS_EXTRA_CLANG_NICHECKER_SUPPORT_TYPES_H
 #define LLVM_CLANG_TOOLS_EXTRA_CLANG_NICHECKER_SUPPORT_TYPES_H
 
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
+#include "clang/Basic/LangOptions.h"
+#include "clang/Basic/SourceManager.h"
+#include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "llvm/ADT/StringRef.h"
 
@@ -30,6 +34,10 @@ struct PipelineOptions {
   std::string InputPath;
   std::string OutputPath;
   std::string PipelineSpec;
+  std::string PipelineProfile;
+  unsigned Unwind = 1;
+  unsigned UnwindWhile = 1;
+  unsigned UnwindFor = 1;
   bool PrintAnalysis = false;
   bool EnableCBMC = false;
 };
@@ -47,10 +55,36 @@ struct TransformResult {
   std::vector<TextReplacement> PendingReplacements;
 };
 
+class TranslationUnitHandle {
+public:
+  explicit TranslationUnitHandle(CompilerInstance &CI) : CI(&CI) {}
+  explicit TranslationUnitHandle(ASTUnit &Unit) : Unit(&Unit) {}
+
+  ASTContext &getASTContext() const {
+    return CI ? CI->getASTContext() : Unit->getASTContext();
+  }
+
+  SourceManager &getSourceManager() const {
+    return CI ? CI->getSourceManager() : Unit->getSourceManager();
+  }
+
+  const LangOptions &getLangOpts() const {
+    return CI ? CI->getLangOpts() : Unit->getLangOpts();
+  }
+
+private:
+  CompilerInstance *CI = nullptr;
+  ASTUnit *Unit = nullptr;
+};
+
 struct PipelineContext {
-  CompilerInstance &CI;
+  const TranslationUnitHandle &TU;
   const PipelineOptions &Options;
-  llvm::StringRef OriginalSource;
+  llvm::StringRef CurrentSource;
+
+  ASTContext &getASTContext() const { return TU.getASTContext(); }
+  SourceManager &getSourceManager() const { return TU.getSourceManager(); }
+  const LangOptions &getLangOpts() const { return TU.getLangOpts(); }
 };
 
 inline llvm::StringRef toString(ProgramKind Kind) {

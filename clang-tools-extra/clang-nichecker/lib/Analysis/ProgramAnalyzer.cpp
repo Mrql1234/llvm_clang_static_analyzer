@@ -10,6 +10,18 @@ static bool containsName(const std::vector<std::string> &Names,
   return llvm::is_contained(Names, Name.str());
 }
 
+static const FunctionDecl *findMainFunction(ASTContext &Context) {
+  SourceManager &SM = Context.getSourceManager();
+  for (Decl *D : Context.getTranslationUnitDecl()->decls()) {
+    const auto *FD = dyn_cast<FunctionDecl>(D);
+    if (!FD || !FD->isMain() || !FD->hasBody())
+      continue;
+    if (isMainFileLocation(FD->getLocation(), SM))
+      return FD;
+  }
+  return nullptr;
+}
+
 ProgramAnalyzer::ProgramAnalyzer(ASTContext &Context)
     : Context(Context), SM(Context.getSourceManager()) {}
 
@@ -63,6 +75,19 @@ ProgramSummary ProgramAnalyzer::finalize() {
   }
 
   return Summary;
+}
+
+ProgramSummary analyzeProgram(ASTContext &Context) {
+  ProgramAnalyzer Analyzer(Context);
+  Analyzer.TraverseDecl(Context.getTranslationUnitDecl());
+  return Analyzer.finalize();
+}
+
+ProgramSummary refreshSummaryForCurrentAST(ASTContext &Context,
+                                           const ProgramSummary &Previous) {
+  ProgramSummary Refreshed = Previous;
+  Refreshed.MainFunction = findMainFunction(Context);
+  return Refreshed;
 }
 
 } // namespace clang::nichecker

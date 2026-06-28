@@ -1,6 +1,5 @@
-#include "clang-nichecker/Passes/LabelInsertionPass.h"
+#include "clang-nichecker/Passes/SlicePass.h"
 #include "clang-nichecker/Support/LegacyJarRunner.h"
-#include "clang-nichecker/Support/SourceUtils.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "llvm/Support/FormatVariadic.h"
@@ -16,26 +15,13 @@ namespace clang::nichecker {
 
 namespace {
 
-bool shouldRunLabelJar(const PipelineOptions &Options,
+bool shouldRunSliceJar(const PipelineOptions &Options,
                        const TransformResult &Result) {
   if (Result.Summary.Kind == ProgramKind::Sequential)
     return false;
   if (Options.PipelineProfile == "lazy")
     return true;
-  return StringRef(Options.PipelineSpec).contains("insertLabel") ||
-         StringRef(Options.PipelineSpec).contains("label-insertion");
-}
-
-std::vector<std::string> collectFunctionNames(ASTContext &AST) {
-  std::vector<std::string> Names;
-  for (Decl *D : AST.getTranslationUnitDecl()->decls()) {
-    const auto *FD = dyn_cast<FunctionDecl>(D);
-    if (!FD || !FD->hasBody())
-      continue;
-    if (!FD->getName().empty())
-      Names.push_back(FD->getNameAsString());
-  }
-  return Names;
+  return StringRef(Options.PipelineSpec).contains("slice");
 }
 
 std::string collectGlobalVariables(ASTContext &AST) {
@@ -50,7 +36,7 @@ std::string collectGlobalVariables(ASTContext &AST) {
   return joinList(Names);
 }
 
-std::string buildLabelDataJson(const PipelineContext &Context,
+std::string buildSliceDataJson(const PipelineContext &Context,
                                const TransformResult &Result) {
   json::Object Root;
   Root["var"] = collectGlobalVariables(Context.getASTContext());
@@ -58,41 +44,39 @@ std::string buildLabelDataJson(const PipelineContext &Context,
   Root["mode"] = Result.Summary.Kind == ProgramKind::InterruptDriven ? "isr"
                   : Result.Summary.Kind == ProgramKind::MultiThreaded  ? "mt"
                                                                       : "";
-  Root["main_task_0"] = 0;
+  Root["main_task"] = 0;
 
   int Priority = 1;
-  for (const std::string &Name : collectFunctionNames(Context.getASTContext())) {
-    if (startsWithISR(Name))
-      Root[Name] = Priority++;
-  }
+  for (const std::string &Name : Result.Summary.InterruptFunctions)
+    Root[Name] = Priority++;
   return formatv("{0:2}", json::Value(std::move(Root))).str();
 }
 
 } // namespace
 
-llvm::StringRef LabelInsertionPass::name() const { return "label-insertion"; }
+llvm::StringRef SlicePass::name() const { return "slice"; }
 
-llvm::Error LabelInsertionPass::run(const PipelineContext &Context,
-                                    TransformResult &Result) const {
-  if (!shouldRunLabelJar(Context.Options, Result)) {
+llvm::Error SlicePass::run(const PipelineContext &Context,
+                           TransformResult &Result) const {
+  if (!shouldRunSliceJar(Context.Options, Result)) {
     Result.Notes.push_back(
-        "phase4: label-insertion 当前仅在非顺序程序的 lazy/显式 insertLabel 链路启用，其余场景保持源码不变");
+        "phase4: slice 当前仅在非顺序程序的 lazy/显式 slice 链路启用，其余场景保持源码不变");
     return Error::success();
   }
 
   LegacyJarInvocationConfig Config;
-  Config.PassName = "label-insertion";
-  Config.JarName = "testLabelReduc.jar";
+  Config.PassName = "slice";
+  Config.JarName = "testSlice.jar";
   Config.InputPrefix = "istLab_";
-  Config.OutputPrefix = "label_";
-  Config.LegacyEntryFunction = "main_task_0";
+  Config.OutputPrefix = "slice_seq_";
+  Config.LegacyEntryFunction = "main_task";
 
   Expected<LegacyJarInvocationResult> Invocation =
       runLegacyJarTransform(Context, Result, Config,
-                            buildLabelDataJson(Context, Result));
+                            buildSliceDataJson(Context, Result));
   if (!Invocation) {
     Result.Notes.push_back(
-        formatv("phase4: label-insertion 未能调用 legacy jar，已跳过；原因: {0}",
+        formatv("phase4: slice 未能调用 legacy jar，已跳过；原因: {0}",
                 toString(Invocation.takeError()))
             .str());
     return Error::success();
@@ -100,10 +84,10 @@ llvm::Error LabelInsertionPass::run(const PipelineContext &Context,
 
   Result.PendingReplacements.clear();
   Result.Source = Invocation->TransformedSource;
-  Result.Notes.push_back(
-      formatv("phase4: label-insertion 已通过 legacy jar 生成输出，目录: {0}",
-              Invocation->WorkDir)
-          .str());
+  Result.Notes.push_back(formatv(
+                             "phase4: slice 已通过 legacy jar 生成输出，目录: {0}",
+                             Invocation->WorkDir)
+                             .str());
   return Error::success();
 }
 

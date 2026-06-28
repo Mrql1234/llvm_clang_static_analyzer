@@ -22,6 +22,10 @@ private:
   ProgramSummary Summary;
 };
 
+ProgramSummary analyzeProgram(ASTContext &Context);
+ProgramSummary refreshSummaryForCurrentAST(ASTContext &Context,
+                                           const ProgramSummary &Previous);
+
 } // namespace clang::nichecker
 
 #endif

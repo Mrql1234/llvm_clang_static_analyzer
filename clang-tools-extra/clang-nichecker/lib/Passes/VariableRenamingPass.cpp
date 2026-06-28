@@ -106,7 +106,7 @@ llvm::Error VariableRenamingPass::run(const PipelineContext &Context,
     return llvm::Error::success();
   }
 
-  ASTContext &AST = Context.CI.getASTContext();
+  ASTContext &AST = Context.getASTContext();
   ScopedVariableRenameCollector Collector(AST);
   Collector.TraverseDecl(AST.getTranslationUnitDecl());
   std::vector<TextReplacement> Replacements = Collector.takeReplacements();

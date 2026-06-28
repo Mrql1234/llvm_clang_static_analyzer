@@ -4,18 +4,25 @@ set(LLVM_LINK_COMPONENTS
 
 add_clang_executable(clang-nichecker
   ClangNIChecker.cpp
+  lib/Backend/CBMCRunner.cpp
   lib/Analysis/ProgramAnalyzer.cpp
   lib/Backend/CBMCDriverPass.cpp
   lib/Driver/Frontend.cpp
   lib/Driver/PipelineBuilder.cpp
   lib/Passes/ConditionExtractionPass.cpp
+  lib/Passes/FeederPass.cpp
+  lib/Passes/FeederSeqProgramPass.cpp
   lib/Passes/InterruptLoweringPass.cpp
+  lib/Passes/LegacyModulePass.cpp
   lib/Passes/LabelInsertionPass.cpp
   lib/Passes/LoopUnrollPass.cpp
   lib/Passes/ProgramClassifierPass.cpp
   lib/Passes/SequentializationPass.cpp
+  lib/Passes/SlicePass.cpp
+  lib/Passes/SliceSeqProgramPass.cpp
   lib/Passes/SourceEmissionPass.cpp
   lib/Passes/VariableRenamingPass.cpp
+  lib/Support/LegacyJarRunner.cpp
   lib/Support/SourceUtils.cpp
   )
 

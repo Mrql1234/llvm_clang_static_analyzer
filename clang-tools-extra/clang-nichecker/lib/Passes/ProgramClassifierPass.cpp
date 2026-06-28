@@ -11,12 +11,9 @@ llvm::StringRef ProgramClassifierPass::name() const {
 
 llvm::Error ProgramClassifierPass::run(const PipelineContext &Context,
                                        TransformResult &Result) const {
-  ASTContext &AST = Context.CI.getASTContext();
-  ProgramAnalyzer Analyzer(AST);
-  Analyzer.TraverseDecl(AST.getTranslationUnitDecl());
-  Result.Summary = Analyzer.finalize();
-  Result.Source = Context.OriginalSource.str();
-  Result.Notes.push_back("phase1: 完成 AST 解析与程序分类");
+  Result.Summary = analyzeProgram(Context.getASTContext());
+  Result.Source = Context.CurrentSource.str();
+  Result.Notes.push_back("phase1: completed AST analysis and program classification");
   return llvm::Error::success();
 }
 

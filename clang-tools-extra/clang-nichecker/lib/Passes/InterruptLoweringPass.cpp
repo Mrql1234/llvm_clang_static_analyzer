@@ -1,6 +1,5 @@
 #include "clang-nichecker/Passes/InterruptLoweringPass.h"
 #include "clang-nichecker/Support/SourceUtils.h"
-#include "llvm/Support/FormatVariadic.h"
 
 using namespace clang;
 
@@ -17,25 +16,25 @@ llvm::Error InterruptLoweringPass::run(const PipelineContext &Context,
 
   if (Result.Summary.UsesPthreadCreate) {
     Result.Notes.push_back(
-        "phase2: 检测到 pthread_create，推测输入已处于多线程中间态，跳过重复中断降级");
+        "phase2: detected pthread_create in the current source; skipping duplicate interrupt lowering");
     return llvm::Error::success();
   }
 
   const FunctionDecl *Main = Result.Summary.MainFunction;
   if (!Main || !Main->hasBody()) {
     Result.Notes.push_back(
-        "phase2: 未找到主文件中的 main 定义，保持原始源码不变");
+        "phase2: main definition was not found in the current AST; kept source unchanged");
     return llvm::Error::success();
   }
 
-  const SourceManager &SM = Context.CI.getSourceManager();
-  const LangOptions &LangOpts = Context.CI.getLangOpts();
+  const SourceManager &SM = Context.getSourceManager();
+  const LangOptions &LangOpts = Context.getLangOpts();
 
   std::optional<std::string> MainBodyText =
       getSourceText(Main->getBody()->getSourceRange(), SM, LangOpts);
   if (!MainBodyText) {
     Result.Notes.push_back(
-        "phase2: 无法提取 main 函数体源码，保持原始源码不变");
+        "phase2: failed to extract the main body text; kept source unchanged");
     return llvm::Error::success();
   }
 
@@ -44,9 +43,9 @@ llvm::Error InterruptLoweringPass::run(const PipelineContext &Context,
       Lexer::getLocForEndOfToken(Main->getEndLoc(), 0, SM, LangOpts);
   std::optional<unsigned> EndOffset = getFileOffset(EndLoc, SM);
   if (!BeginOffset || !EndOffset || *BeginOffset > *EndOffset ||
-      *EndOffset > Result.Source.size()) {
+      *EndOffset > Context.CurrentSource.size()) {
     Result.Notes.push_back(
-        "phase2: 无法定位 main 定义源码区间，保持原始源码不变");
+        "phase2: failed to locate the main definition range in the current source; kept source unchanged");
     return llvm::Error::success();
   }
 
@@ -64,7 +63,7 @@ llvm::Error InterruptLoweringPass::run(const PipelineContext &Context,
   Result.PendingReplacements.push_back(
       TextReplacement{*BeginOffset, *EndOffset - *BeginOffset, Replacement});
   Result.Notes.push_back(
-      "phase2: 已将中断驱动输入归一化为有界多线程入口(main -> main_task + wrapper main)");
+      "phase2: lowered the interrupt-style main entry into main_task + wrapper main");
   return llvm::Error::success();
 }
 

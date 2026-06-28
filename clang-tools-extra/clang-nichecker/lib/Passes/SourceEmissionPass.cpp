@@ -1,4 +1,5 @@
 #include "clang-nichecker/Passes/SourceEmissionPass.h"
+#include "clang-nichecker/Support/LegacyJarRunner.h"
 #include "clang-nichecker/Support/SourceUtils.h"
 #include "llvm/Support/FormatVariadic.h"
 
@@ -58,13 +59,12 @@ llvm::StringRef SourceEmissionPass::name() const { return "source-emission"; }
 
 llvm::Error SourceEmissionPass::run(const PipelineContext &Context,
                                     TransformResult &Result) const {
-  Result.Source = Context.OriginalSource.str();
-  applyReplacements(Result.Source, Result.PendingReplacements);
+  Result.Source = materializeSource(Context, Result);
 
   bool NeedsPthreadWrapper = Result.Summary.Kind == ProgramKind::InterruptDriven;
   std::string Header = buildGeneratedHeader(Context.Options, Result);
   std::string Prelude =
-      buildCompatibilityPrelude(Context.OriginalSource, Result.Source,
+      buildCompatibilityPrelude(Context.CurrentSource, Result.Source,
                                 NeedsPthreadWrapper);
   Result.Source = Header + Prelude + Result.Source;
   return Error::success();

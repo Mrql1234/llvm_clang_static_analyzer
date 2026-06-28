@@ -36,9 +36,27 @@ static cl::opt<std::string>
     PipelineOpt("pipeline", cl::cat(ClangNICheckerCategory),
                 cl::desc("以逗号分隔的模块链配置，留空时使用默认模块链"));
 
+static cl::opt<std::string>
+    PipelineProfileOpt("pipeline-profile", cl::cat(ClangNICheckerCategory),
+                       cl::desc("选择预定义模块链，支持 default/lazy/shenfei"));
+
 static cl::opt<bool>
     EnableCBMCOpt("enable-cbmc", cl::cat(ClangNICheckerCategory),
                   cl::desc("把 cbmc-driver 模块加入当前模块链"));
+
+static cl::opt<unsigned>
+    UnwindOpt("unwind", cl::cat(ClangNICheckerCategory),
+              cl::desc("循环展开默认上界"), cl::init(1));
+
+static cl::opt<unsigned>
+    UnwindWhileOpt("unwind-while", cl::cat(ClangNICheckerCategory),
+                   cl::desc("while 循环展开上界，默认继承 --unwind"),
+                   cl::init(0));
+
+static cl::opt<unsigned>
+    UnwindForOpt("unwind-for", cl::cat(ClangNICheckerCategory),
+                 cl::desc("for 循环展开上界，默认继承 --unwind"),
+                 cl::init(0));
 
 } // namespace
 
@@ -65,6 +83,10 @@ int main(int argc, const char **argv) {
   Options.OutputPath = OutputPathOpt;
   Options.PrintAnalysis = PrintAnalysisOpt;
   Options.PipelineSpec = PipelineOpt;
+  Options.PipelineProfile = PipelineProfileOpt;
+  Options.Unwind = UnwindOpt;
+  Options.UnwindWhile = UnwindWhileOpt ? UnwindWhileOpt : UnwindOpt;
+  Options.UnwindFor = UnwindForOpt ? UnwindForOpt : UnwindOpt;
   Options.EnableCBMC = EnableCBMCOpt;
 
   auto Factory = clang::nichecker::createActionFactory(Options);

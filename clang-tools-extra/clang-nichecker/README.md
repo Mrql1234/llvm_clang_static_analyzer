@@ -1,237 +1,255 @@
 # clang-nichecker
 
-## 目标
+## 项目定位
 
-`clang-nichecker` 是对 `nichecker/Cseq` 源码到源码迁移链路的 C++ 重构版本，落地在 `clang-tools-extra` 下，基于 Clang LibTooling 和 AST 实现。
+`clang-nichecker` 的目标是把旧版 `nichecker/Cseq` 的 Python 源码到源码处理链路，逐步迁移到 C++ / Clang 体系下的 in-tree 工具。
 
-最终目标不是做单点诊断，而是完成下面这条完整流程：
+当前关注点不是单条规则检查，而是保留旧 nichecker 的整体处理流程：
 
-1. 读取用户输入的中断程序或多线程程序
-2. 经过多个源码级模块做解析、归一化和变换
-3. 生成顺序程序
-4. 调用 CBMC
-5. 输出验证结果
+1. 读取顺序程序、多线程程序或中断程序。
+2. 按 pipeline 依次做 AST 分析、源码改写、旧 jar 桥接和顺序化。
+3. 产出新的 C 源码。
+4. 在可行时继续对接 CBMC。
 
-## 当前阶段
+## 当前入口
 
-当前实现已经完成两步基础工作：
+主入口文件：
 
-1. Phase 1：AST 解析与程序分类
-   - 识别顺序程序、多线程程序、中断驱动程序
-   - 收集 `pthread_create` 线程入口和 `ISR_*` 中断入口
-2. Phase 2：中断程序归一化
-   - 对中断驱动输入，把 `main` 改写成 `main_task`
-   - 生成一个新的 wrapper `main`
-   - 让输出源码先落到“有界多线程风格”的中间形态
-3. Phase 4：作用域变量改名
-   - 对顺序/多线程输入，基于 AST 收集函数参数和局部变量
-   - 输出 `__cs_param_<func>_<name>` / `__cs_local_<func>_<name>` 风格的新名字
-   - 先避免不同函数里的同名局部变量互相冲突，给后续顺序化打基础
-4. Phase 4：第一版条件抽取
-   - 对顺序/多线程输入，把部分 `if (cond)` 改写成“先计算临时变量，再进入 `if`”
-   - 当前先覆盖不依赖局部变量/函数参数的 `if` 条件
-   - 输出 `__cs_tmp_if_cond_<n>` 风格的临时条件变量
+1. `clang-tools-extra/clang-nichecker/ClangNIChecker.cpp`
+2. `clang-tools-extra/clang-nichecker/lib/Driver/Frontend.cpp`
+3. `clang-tools-extra/clang-nichecker/lib/Driver/PipelineBuilder.cpp`
 
-当前还没有完成真正的顺序化和 CBMC 联调，因此默认输出文件虽然仍使用 `.seq.c` 扩展名，但对于中断输入，现阶段含义更接近“归一化后的中间源码”。
+主要模块入口：
 
-## 入口文件
+1. `clang-tools-extra/clang-nichecker/lib/Passes/SlicePass.cpp`
+2. `clang-tools-extra/clang-nichecker/lib/Passes/LabelInsertionPass.cpp`
+3. `clang-tools-extra/clang-nichecker/lib/Passes/SliceSeqProgramPass.cpp`
+4. `clang-tools-extra/clang-nichecker/lib/Passes/SequentializationPass.cpp`
+5. `clang-tools-extra/clang-nichecker/lib/Passes/FeederPass.cpp`
+6. `clang-tools-extra/clang-nichecker/lib/Passes/FeederSeqProgramPass.cpp`
+7. `clang-tools-extra/clang-nichecker/lib/Backend/CBMCDriverPass.cpp`
+8. `clang-tools-extra/clang-nichecker/lib/Support/LegacyJarRunner.cpp`
+9. `clang-tools-extra/clang-nichecker/lib/Analysis/ProgramAnalyzer.cpp`
 
-- 工具主入口：`/home/ql/code/llvm_clang_static_analyzer/clang-tools-extra/clang-nichecker/ClangNIChecker.cpp`
-- Frontend/Driver 入口：`/home/ql/code/llvm_clang_static_analyzer/clang-tools-extra/clang-nichecker/lib/Driver/Frontend.cpp`
-- 模块链装配入口：`/home/ql/code/llvm_clang_static_analyzer/clang-tools-extra/clang-nichecker/lib/Driver/PipelineBuilder.cpp`
+## 当前已经落地的能力
 
-## 结构约束
+### 真实 pass
 
-当前 `ClangNIChecker.cpp` 里的实现是迁移早期原型，不代表最终代码组织方式。
+当前已经不是占位的 pass 包括：
 
-后续新增功能必须遵循下面约束：
+1. `ProgramClassifierPass`
+2. `InterruptLoweringPass`
+3. `ConditionExtractionPass`
+4. `VariableRenamingPass`
+5. `LoopUnrollPass`
+6. `SequentializationPass`
+7. `SourceEmissionPass`
+8. `SlicePass`
+9. `LabelInsertionPass`
+10. `SliceSeqProgramPass`
+11. `FeederPass`
+12. `FeederSeqProgramPass`
+13. `CBMCDriverPass`
 
-1. 不再把新分析器、pass、源码改写工具、CBMC 驱动继续堆进同一个类或同一个源文件
-2. `Driver` 只负责参数解析、模块链装配和执行调度，不直接承载具体变换逻辑
-3. 一个 pass 一个独立类，后续应逐步拆到独立文件，便于配置模块链
-4. 公共上下文、源码替换、AST 辅助函数应放到独立 `support` 层
+### 旧 jar 桥接
 
-目标层次应至少包括：
+当前已经接通的旧 jar 包：
 
-1. `Driver`
-2. `Analysis`
-3. `Passes`
-4. `Support`
-5. `Backend`
+1. `nichecker/Cseq/testSlice.jar`
+2. `nichecker/Cseq/testLabelReduc.jar`
+3. `nichecker/Cseq/testSlice_seqProgramSlice.jar`
 
-目标是让后续模块能够按配置组成模块链，而不是依赖一个不断膨胀的入口文件。
+这些桥接统一由 `lib/Support/LegacyJarRunner.cpp` 负责：
 
-## 当前目录结构
+1. 只查找当前系统 `PATH` 里的 `java`。
+2. 不再调用 Windows `java.exe`。
+3. 输入源码和 `data.json` 会先写入临时目录，再调用 `java -jar ...`。
+4. 当前 `slice` 使用旧协议入口名 `main_task`。
+5. 当前 `label-insertion` 使用旧协议入口名 `main_task_0`。
 
-当前代码已经拆到下面几层：
+## 2026-06 新增：AST 重解析机制
 
-```text
-clang-tools-extra/clang-nichecker/
-  ClangNIChecker.cpp
-  README.md
-  include/clang-nichecker/
-    Analysis/
-    Backend/
-    Driver/
-    Passes/
-    Support/
-  lib/
-    Analysis/
-    Backend/
-    Driver/
-    Passes/
-    Support/
-```
+### 背景
 
-## 当前模块链
+之前的 C++ pipeline 只在最开始 parse 一次，后续所有 AST pass 都共享第一次的 `CompilerInstance`。只要前面的 pass 或 jar 已经改过源码，后面的 AST pass 看到的仍然是旧 AST，偏移和语义基准都可能过时。
 
-默认模块链：
+### 入口文件
 
-1. `program-classifier`
-2. `interrupt-lowering`
-3. `condition-extraction`
-4. `variable-renaming`
-5. `label-insertion`
-6. `loop-unroll`
-7. `sequentialization`
-8. `source-emission`
+这次机制主要落在下面几个文件：
 
-说明：
+1. `clang-tools-extra/clang-nichecker/lib/Driver/Frontend.cpp`
+2. `clang-tools-extra/clang-nichecker/include/clang-nichecker/Support/Types.h`
+3. `clang-tools-extra/clang-nichecker/lib/Support/LegacyJarRunner.cpp`
+4. `clang-tools-extra/clang-nichecker/lib/Passes/SequentializationPass.cpp`
 
-1. `program-classifier`、`interrupt-lowering`、`condition-extraction`、`variable-renaming` 已有第一版实现
-2. `label-insertion`、`loop-unroll`、`sequentialization` 当前已拆成独立模块骨架，后续在各自文件内继续补实现
-3. `cbmc-driver` 已拆成独立 backend 模块骨架，需要显式启用
+### 现在的行为
+
+现在每个 pass 结束后，驱动层会做下面的事情：
+
+1. 先把 `Result.Source` 或 `PendingReplacements` 物化成“当前源码”。
+2. 如果这份当前源码和上一个 pass 的输入源码不同，就复制当前 `CompilerInvocation`。
+3. 把主文件 remap 成当前源码。
+4. 调用 `ASTUnit::LoadFromCompilerInvocation(...)` 重新生成 AST。
+5. 下一个 pass 读到的 `PipelineContext` 就会切换到“当前 AST 会话 + 当前源码”。
+
+`PipelineContext` 现在通过 `TranslationUnitHandle` 统一提供：
+
+1. `ASTContext`
+2. `SourceManager`
+3. `LangOptions`
+4. `CurrentSource`
+
+### 直接修复的点
+
+1. `slice_seqprogram` 改完源码后，`SequentializationPass` 可以基于新 AST 继续工作，不再退回旧的文本兜底分支。
+2. 后续 AST pass 不会再对第一次 parse 的旧源码计算 replacement。
+3. `LegacyJarRunner` 的源码物化基准已经改成 `CurrentSource`。
+
+## 2026-06 新增：阶段化摘要刷新
+
+### 背景
+
+重解析接通以后，`ProgramSummary` 里有两类信息不能混在一起：
+
+1. 稳定语义摘要。
+2. 当前 AST 绑定字段。
+
+如果重解析后整包重算摘要，`lazy` 在 `slice` 后会因为中间源码看起来像顺序程序，被误判成 `sequential`，从而错误跳过 `label-insertion`。
+
+### 入口文件
+
+这部分改动主要在：
+
+1. `clang-tools-extra/clang-nichecker/include/clang-nichecker/Analysis/ProgramAnalyzer.h`
+2. `clang-tools-extra/clang-nichecker/lib/Analysis/ProgramAnalyzer.cpp`
+3. `clang-tools-extra/clang-nichecker/lib/Driver/Frontend.cpp`
+
+### 当前行为
+
+现在的摘要刷新规则是：
+
+1. `ProgramSummary.Kind`、线程入口、ISR 名单这些仍然保留分类阶段的稳定语义，不会因为中间 jar 产物长得像顺序程序就改变 pipeline 分支。
+2. `ProgramSummary.MainFunction` 会在每次重解析后刷新到当前 AST，避免悬空指针和旧 AST 绑定。
+
+## 2026-06 新增：中断链路修正
+
+### 入口文件
+
+这部分改动主要在：
+
+1. `clang-tools-extra/clang-nichecker/lib/Passes/InterruptLoweringPass.cpp`
+2. `clang-tools-extra/clang-nichecker/lib/Passes/LoopUnrollPass.cpp`
+
+### 当前行为
+
+1. `InterruptLoweringPass` 已经改成完全基于 `CurrentSource` 工作，不再依赖 pass 边界前的 `Result.Source`。
+2. `LoopUnrollPass` 修掉了 `while/for` 展开时多输出一个 `}` 的问题。
 
 ## 构建命令
 
+仓库根目录：
+
 ```bash
 cd /home/ql/code/llvm_clang_static_analyzer
-cmake --build build-csa --target clang-nichecker -j 4
 ```
 
-## 运行命令
+稳定构建命令：
 
-### 1. 分析多线程样例
+```bash
+cd /home/ql/code/llvm_clang_static_analyzer/build-csa
+ninja -j1 clang-nichecker
+```
+
+说明：
+
+1. `build-csa` 已经配置为 `Ninja` 生成器。
+2. 当前 WSL 内存较紧时，并行编译容易把多个 `cc1plus` 顶掉，所以这里优先记录 `-j1` 的稳定命令。
+
+## 回归命令
+
+### shenfei 回归
+
+入口文件：
+
+1. `nichecker/Cseq/examples/example011.c`
+
+运行命令：
 
 ```bash
 cd /home/ql/code/llvm_clang_static_analyzer
-build-csa/bin/clang-nichecker \
-  -print-analysis \
+env PATH=/home/ql/.local/java/jdk-11.0.31+11-jre/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  build-csa/bin/clang-nichecker --pipeline-profile=shenfei -print-analysis \
+  -output=/tmp/shenfei_reparse_refresh2.c \
+  nichecker/Cseq/examples/example011.c -- -I./nichecker/Cseq/core/include
+```
+
+当前结果：
+
+1. `slice_seqprogram` 成功调用旧 jar。
+2. jar 产物会被重新 parse。
+3. `SequentializationPass` 能继续重写入口。
+4. `FeederSeqProgramPass` 仍然得到 `SAFE`。
+
+### lazy 回归
+
+入口文件：
+
+1. `nichecker/Cseq/examples/lazy_unsafe.c`
+
+运行命令：
+
+```bash
+cd /home/ql/code/llvm_clang_static_analyzer
+env PATH=/home/ql/.local/java/jdk-11.0.31+11-jre/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  build-csa/bin/clang-nichecker --pipeline-profile=lazy -print-analysis \
+  -output=/tmp/lazy_reparse_refresh2.c \
   nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
 ```
 
-### 2. 分析并归一化中断样例
+当前结果：
+
+1. `slice` 和 `label-insertion` 的旧 jar 调用没有被 AST 重解析机制打断。
+2. `ProgramSummary` 不会再因为中间源码形态变化而把 `lazy` 主链路误判成顺序程序。
+3. `feeder` 仍然会识别源码中残留的 `pthread_*` / `addLabel()` 等并发痕迹。
+4. 当前 `lazyseq` / `replacegoto` 真实语义还没迁完，所以这里仍然会明确跳过直接喂给 CBMC。
+
+### 中断样例回归
+
+入口文件：
+
+1. `nichecker/Cseq/examples/mytest_3.c`
+
+运行命令：
 
 ```bash
 cd /home/ql/code/llvm_clang_static_analyzer
-build-csa/bin/clang-nichecker \
-  -print-analysis \
+env PATH=/home/ql/.local/java/jdk-11.0.31+11-jre/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  build-csa/bin/clang-nichecker -print-analysis \
+  -output=/tmp/interrupt_reparse_refresh4.c \
   nichecker/Cseq/examples/mytest_3.c -- -I./nichecker/Cseq/core/include
 ```
 
-### 3. 指定输出路径
+如果想单独检查产物语法，可以再执行：
 
 ```bash
-cd /home/ql/code/llvm_clang_static_analyzer
-build-csa/bin/clang-nichecker \
-  -output=/tmp/mytest_3.seq.c \
-  nichecker/Cseq/examples/mytest_3.c -- -I./nichecker/Cseq/core/include
+clang -fsyntax-only /tmp/interrupt_reparse_refresh4.c
 ```
 
-### 4. 查看变量改名结果
+当前结果：
 
-```bash
-cd /home/ql/code/llvm_clang_static_analyzer
-build-csa/bin/clang-nichecker \
-  -output=/tmp/lazy_unsafe.seq.c \
-  nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
-```
+1. `phase2` 已经能稳定进入 `interrupt-lowering`，不再因为旧的 `Result.Source` 边界检查而直接跳过。
+2. `loop-unroll` 生成的括号结构已经修正。
+3. 这个样例现在剩下的主要问题来自样例自身历史问题，例如 `ISR_L` 里 `return NULL;` 与函数返回类型不匹配，以及 `pthread_create` 还没有声明，不再是这次重解析机制引入的新语法错误。
 
-### 5. 查看条件抽取结果
+## 当前限制
 
-```bash
-cd /home/ql/code/llvm_clang_static_analyzer
-build-csa/bin/clang-nichecker \
-  -print-analysis \
-  -output=/tmp/lazy_unsafe.seq.c \
-  nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
-```
+1. `lazy` 主链路还没有把旧版 `lazyseq` / `replacegoto` 的真实顺序化语义迁完。
+2. 仍然有一批旧模块只是占位映射。
+3. `CBMCDriverPass` 和 `feeder_seqprogram` 还没有补齐旧版全部参数与 counterexample 抽取逻辑。
+4. `ProgramSummary` 目前采用“稳定语义摘要 + 当前 AST 绑定字段”的折中方案；如果后续要支持更细粒度的阶段性语义切换，还需要继续拆分摘要模型。
 
-### 6. 指定自定义模块链
+## 建议的后续推进方向
 
-```bash
-cd /home/ql/code/llvm_clang_static_analyzer
-build-csa/bin/clang-nichecker \
-  -pipeline=program-classifier,variable-renaming,source-emission \
-  -print-analysis \
-  -output=/tmp/lazy_unsafe.custom.seq.c \
-  nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
-```
-
-### 7. 启用 CBMC backend 骨架
-
-```bash
-cd /home/ql/code/llvm_clang_static_analyzer
-build-csa/bin/clang-nichecker \
-  -enable-cbmc \
-  -print-analysis \
-  nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
-```
-
-## 当前输出特征
-
-对于中断输入，当前输出会保留原始全局变量和中断函数，并把原始 `main` 改写成类似下面的结构：
-
-```c
-void *main_task(void *__cs_param_main_task_arg) {
-  /* 原 main 函数体 */
-}
-
-int main() {
-  pthread_t __cs_local_main_t0;
-  pthread_create(&__cs_local_main_t0, 0, main_task, 0);
-  return 0;
-}
-```
-
-这是为了先把“中断驱动程序”收敛到后续顺序化更容易处理的统一入口形态。
-
-对于顺序/多线程输入，当前还会对函数参数和局部变量做第一版作用域改名。例如：
-
-```c
-void *thread1(void *__cs_param_thread1_arg) {
-  ...
-}
-
-int main() {
-  pthread_t __cs_local_main_t1;
-  ...
-}
-```
-
-这一版改名逻辑当前只覆盖函数参数、局部变量声明和 `DeclRefExpr` 引用，还没有扩展到更复杂的源码重写场景。
-
-对于顺序/多线程输入，当前还支持第一版 `if` 条件抽取。例如：
-
-```c
-_Bool __cs_tmp_if_cond_0 = (data >= 3);
-if (__cs_tmp_if_cond_0) {
-  ...
-}
-```
-
-当前限制：
-
-1. 只处理 `if`，还没有覆盖 `while` 和 `for`
-2. 只处理不依赖局部变量/函数参数的条件，避免和当前变量改名规则冲突
-3. 中断输入暂时跳过条件抽取，后续需要在“降级后重新建 AST”这一步补齐
-
-## 后续阶段
-
-后续按下面顺序推进：
-
-1. 补齐输入兼容层，减少对临时 `-include` 参数的依赖
-2. 在已经拆开的 `Analysis / Passes / Support / Backend` 层次上继续扩展模块链
-3. 在现有变量改名和第一版 `if` 条件抽取基础上，实现 `while/for` 条件抽取、标签插入、循环展开等归一化 pass
-4. 实现多线程到顺序程序的核心顺序化逻辑
-5. 接入 CBMC 驱动与回归验证
+1. 继续把旧链路中的真实语义模块拆成独立 C++ pass。
+2. 优先补 `lazyseq` / `replacegoto`，把多线程到顺序程序的主链路打通。
+3. 在 AST 重解析机制已经稳定的前提下，再考虑把 legacy jar 的“去函数定义再拼回去”逻辑进一步往真正的 AST 级实现靠拢。
