@@ -20,10 +20,10 @@ bool shouldRunLabelJar(const PipelineOptions &Options,
                        const TransformResult &Result) {
   if (Result.Summary.Kind == ProgramKind::Sequential)
     return false;
-  if (Options.PipelineProfile == "lazy")
-    return true;
-  return StringRef(Options.PipelineSpec).contains("insertLabel") ||
-         StringRef(Options.PipelineSpec).contains("label-insertion");
+  return Options.EnableLegacyLabelJar &&
+         (Options.PipelineProfile == "lazy" ||
+          StringRef(Options.PipelineSpec).contains("insertLabel") ||
+          StringRef(Options.PipelineSpec).contains("label-insertion"));
 }
 
 std::vector<std::string> collectFunctionNames(ASTContext &AST) {
@@ -38,26 +38,12 @@ std::vector<std::string> collectFunctionNames(ASTContext &AST) {
   return Names;
 }
 
-std::string collectGlobalVariables(ASTContext &AST) {
-  std::vector<std::string> Names;
-  for (Decl *D : AST.getTranslationUnitDecl()->decls()) {
-    const auto *VD = dyn_cast<VarDecl>(D);
-    if (!VD || !VD->hasGlobalStorage() || VD->isStaticDataMember())
-      continue;
-    if (!VD->getName().empty())
-      Names.push_back(VD->getNameAsString());
-  }
-  return joinList(Names);
-}
-
 std::string buildLabelDataJson(const PipelineContext &Context,
                                const TransformResult &Result) {
   json::Object Root;
-  Root["var"] = collectGlobalVariables(Context.getASTContext());
+  Root["var"] = Context.Options.SliceVariable;
   Root["age"] = 30;
-  Root["mode"] = Result.Summary.Kind == ProgramKind::InterruptDriven ? "isr"
-                  : Result.Summary.Kind == ProgramKind::MultiThreaded  ? "mt"
-                                                                      : "";
+  Root["mode"] = Context.Options.SliceMode;
   Root["main_task_0"] = 0;
 
   int Priority = 1;
@@ -76,7 +62,7 @@ llvm::Error LabelInsertionPass::run(const PipelineContext &Context,
                                     TransformResult &Result) const {
   if (!shouldRunLabelJar(Context.Options, Result)) {
     Result.Notes.push_back(
-        "phase4: label-insertion 当前仅在非顺序程序的 lazy/显式 insertLabel 链路启用，其余场景保持源码不变");
+        "phase4: label-insertion 按 Python 默认 labelReduc=false 跳过 legacy jar，保持源码不变");
     return Error::success();
   }
 

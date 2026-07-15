@@ -34,7 +34,24 @@ std::vector<std::string> buildCBMCSearchRoots() {
   return Roots;
 }
 
-std::optional<std::string> locateBundledCBMC() {
+std::optional<std::string> locateBundledCBMC(StringRef Backend) {
+  if (Backend == "cbmc-ext") {
+    for (const std::string &Root : buildCBMCSearchRoots()) {
+      SmallString<256> Candidate(Root);
+      sys::path::append(Candidate, "nichecker", "Cseq", "backends",
+                        "cbmc-ext");
+      if (sys::fs::exists(Candidate) && !sys::fs::can_execute(Candidate)) {
+        if (ErrorOr<sys::fs::perms> Perms = sys::fs::getPermissions(Candidate))
+          sys::fs::setPermissions(Candidate, *Perms | sys::fs::owner_exe |
+                                                 sys::fs::group_exe |
+                                                 sys::fs::all_exe);
+      }
+      if (sys::fs::can_execute(Candidate))
+        return std::string(Candidate);
+    }
+    return std::nullopt;
+  }
+
   static constexpr const char *RelativeCandidates[] = {
       "nichecker/Cseq/backends/cbmc-5.11",
       "nichecker/Cseq/backends/cbmc",
@@ -46,6 +63,13 @@ std::optional<std::string> locateBundledCBMC() {
     for (const char *Relative : RelativeCandidates) {
       SmallString<256> Candidate(Root);
       sys::path::append(Candidate, Relative);
+      if (sys::fs::exists(Candidate) && !sys::fs::can_execute(Candidate)) {
+        if (ErrorOr<sys::fs::perms> Perms = sys::fs::getPermissions(Candidate)) {
+          sys::fs::setPermissions(
+              Candidate, *Perms | sys::fs::owner_exe | sys::fs::group_exe |
+                             sys::fs::all_exe);
+        }
+      }
       if (sys::fs::can_execute(Candidate))
         return std::string(Candidate);
     }
@@ -76,26 +100,29 @@ std::string buildCombinedLog(StringRef StdoutText, StringRef StderrText) {
 std::vector<std::string> buildCBMCArgs(StringRef Executable,
                                        const CBMCRunConfig &Config) {
   std::vector<std::string> Args;
+  const bool IsCBMCExt = Config.Backend == "cbmc-ext";
   Args.push_back(Executable.str());
   Args.push_back("--unwind");
   Args.push_back(std::to_string(Config.Unwind ? Config.Unwind : 1));
-  if (Config.BoundsCheck)
+  // The bundled cbmc-ext 5.4 only accepts the core BMC options used by the
+  // Python mapper; newer CBMC checks are added only for normal cbmc runs.
+  if (!IsCBMCExt && Config.BoundsCheck)
     Args.push_back("--bounds-check");
-  if (Config.DivByZeroCheck)
+  if (!IsCBMCExt && Config.DivByZeroCheck)
     Args.push_back("--div-by-zero-check");
-  if (Config.PointerCheck)
+  if (!IsCBMCExt && Config.PointerCheck)
     Args.push_back("--pointer-check");
-  if (Config.ConversionCheck)
+  if (!IsCBMCExt && Config.ConversionCheck)
     Args.push_back("--conversion-check");
-  if (Config.Trace)
+  if (!IsCBMCExt && Config.Trace)
     Args.push_back("--trace");
-  if (Config.NoLibrary)
+  if (!IsCBMCExt && Config.NoLibrary)
     Args.push_back("--no-library");
   if (!Config.EntryFunction.empty() && Config.EntryFunction != "main") {
     Args.push_back("--function");
     Args.push_back(Config.EntryFunction);
   }
-  if (Config.ObjectBits) {
+  if (!IsCBMCExt && Config.ObjectBits) {
     Args.push_back("--object-bits");
     Args.push_back(std::to_string(Config.ObjectBits));
   }
@@ -103,6 +130,12 @@ std::vector<std::string> buildCBMCArgs(StringRef Executable,
     Args.push_back("--depth");
     Args.push_back(std::to_string(Config.Depth));
   }
+  if (!Config.DimacsOutputPath.empty()) {
+    Args.push_back("--dimacs");
+    Args.push_back("--outfile");
+    Args.push_back(Config.DimacsOutputPath);
+  }
+  Args.insert(Args.end(), Config.ExtraArgs.begin(), Config.ExtraArgs.end());
   Args.push_back(Config.SourceFilePath);
   return Args;
 }
@@ -118,18 +151,27 @@ VerificationOutcome determineOutcome(StringRef Output) {
 } // namespace
 
 std::optional<std::string> locateCBMCExecutable() {
+  return locateCBMCExecutable("cbmc");
+}
+
+std::optional<std::string> locateCBMCExecutable(StringRef Backend) {
+  if (Backend != "cbmc" && Backend != "cbmc-ext")
+    return std::nullopt;
+  if (Backend == "cbmc-ext")
+    return locateBundledCBMC(Backend);
   if (ErrorOr<std::string> CBMCInPath = sys::findProgramByName("cbmc"))
     return *CBMCInPath;
-  return locateBundledCBMC();
+  return locateBundledCBMC(Backend);
 }
 
 Expected<CBMCRunResult> runCBMC(const CBMCRunConfig &Config,
                                 StringRef LogBasePath) {
-  std::optional<std::string> Executable = locateCBMCExecutable();
+  std::optional<std::string> Executable = locateCBMCExecutable(Config.Backend);
   if (!Executable) {
     return createStringError(
         inconvertibleErrorCode(),
-        "未找到可执行的 CBMC；可使用 PATH 中的 cbmc 或仓库内 nichecker/Cseq/backends/cbmc-5.11");
+        "未找到可执行的后端 %s；可使用 PATH 中的 cbmc 或仓库内 nichecker/Cseq/backends/cbmc-5.11/cbmc-ext",
+        Config.Backend.c_str());
   }
 
   CBMCRunResult Result;

@@ -21,6 +21,7 @@ llvm::Error CBMCDriverPass::run(const PipelineContext &Context,
 
   CBMCRunConfig Config;
   Config.SourceFilePath = Context.Options.OutputPath;
+  Config.Backend = Context.Options.Backend;
   Config.Unwind = Context.Options.Unwind;
   Config.BoundsCheck = true;
   Config.DivByZeroCheck = true;
@@ -55,6 +56,9 @@ llvm::Error CBMCDriverPass::run(const PipelineContext &Context,
               verificationOutcomeToString(Run->Outcome), Run->ExitCode,
               Run->CombinedLogPath)
           .str());
+  Result.BackendOutput = std::move(Run->CombinedOutput);
+  Result.BackendLogPath = Run->CombinedLogPath;
+  Result.BackendOutcome = verificationOutcomeToString(Run->Outcome).str();
   return Error::success();
 }
 

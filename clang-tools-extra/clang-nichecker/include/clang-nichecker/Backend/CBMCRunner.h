@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace clang::nichecker {
 
@@ -17,6 +18,9 @@ enum class VerificationOutcome {
 struct CBMCRunConfig {
   std::string SourceFilePath;
   std::string EntryFunction;
+  std::string Backend = "cbmc";
+  std::string DimacsOutputPath;
+  std::vector<std::string> ExtraArgs;
   unsigned Unwind = 1;
   unsigned Depth = 0;
   bool BoundsCheck = true;
@@ -42,6 +46,7 @@ struct CBMCRunResult {
 };
 
 std::optional<std::string> locateCBMCExecutable();
+std::optional<std::string> locateCBMCExecutable(llvm::StringRef Backend);
 
 llvm::Expected<CBMCRunResult> runCBMC(const CBMCRunConfig &Config,
                                       llvm::StringRef LogBasePath);

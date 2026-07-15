@@ -49,6 +49,42 @@ static cl::opt<unsigned>
               cl::desc("循环展开默认上界"), cl::init(1));
 
 static cl::opt<unsigned>
+    RoundsOpt("rounds", cl::cat(ClangNICheckerCategory),
+              cl::desc("lazy 调度轮数上界"), cl::init(1));
+
+static cl::opt<unsigned>
+    ContextsOpt("contexts", cl::cat(ClangNICheckerCategory),
+                cl::desc("context-bounded DIMACS 映射上下文数"), cl::init(0));
+
+static cl::opt<unsigned>
+    CoresOpt("cores", cl::cat(ClangNICheckerCategory),
+             cl::desc("mapper 并行分支数"), cl::init(1));
+
+static cl::opt<std::string>
+    BackendOpt("backend", cl::cat(ClangNICheckerCategory),
+               cl::desc("后端名称，例如 cbmc 或 cbmc-ext"), cl::init("cbmc"));
+
+static cl::opt<bool>
+    EnableLegacySliceJarOpt("pro-slice", cl::cat(ClangNICheckerCategory),
+                            cl::desc("启用 Python proSlice 对应的 legacy slice jar"));
+
+static cl::opt<bool>
+    EnableLegacyLabelJarOpt("label-reduc", cl::cat(ClangNICheckerCategory),
+                            cl::desc("启用 Python labelReduc 对应的 legacy label jar"));
+
+static cl::opt<std::string>
+    SliceVariableOpt("slice-var", cl::cat(ClangNICheckerCategory),
+                     cl::desc("legacy jar 使用的 Python globalVariable"));
+
+static cl::opt<std::string>
+    SliceModeOpt("slice-mode", cl::cat(ClangNICheckerCategory),
+                 cl::desc("legacy jar 使用的 Python mode，例如 rww"));
+
+static cl::opt<bool>
+    ReuseDimacsOpt("reuse-dimacs", cl::cat(ClangNICheckerCategory),
+                   cl::desc("复用 mapper 已生成的 DIMACS 文件"));
+
+static cl::opt<unsigned>
     UnwindWhileOpt("unwind-while", cl::cat(ClangNICheckerCategory),
                    cl::desc("while 循环展开上界，默认继承 --unwind"),
                    cl::init(0));
@@ -85,6 +121,15 @@ int main(int argc, const char **argv) {
   Options.PipelineSpec = PipelineOpt;
   Options.PipelineProfile = PipelineProfileOpt;
   Options.Unwind = UnwindOpt;
+  Options.Rounds = RoundsOpt;
+  Options.Contexts = ContextsOpt;
+  Options.Cores = CoresOpt;
+  Options.Backend = BackendOpt;
+  Options.EnableLegacySliceJar = EnableLegacySliceJarOpt;
+  Options.EnableLegacyLabelJar = EnableLegacyLabelJarOpt;
+  Options.SliceVariable = SliceVariableOpt;
+  Options.SliceMode = SliceModeOpt;
+  Options.ReuseDimacs = ReuseDimacsOpt;
   Options.UnwindWhile = UnwindWhileOpt ? UnwindWhileOpt : UnwindOpt;
   Options.UnwindFor = UnwindForOpt ? UnwindForOpt : UnwindOpt;
   Options.EnableCBMC = EnableCBMCOpt;

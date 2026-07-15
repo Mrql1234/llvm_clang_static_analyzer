@@ -28,8 +28,9 @@
 5. `clang-tools-extra/clang-nichecker/lib/Passes/FeederPass.cpp`
 6. `clang-tools-extra/clang-nichecker/lib/Passes/FeederSeqProgramPass.cpp`
 7. `clang-tools-extra/clang-nichecker/lib/Backend/CBMCDriverPass.cpp`
-8. `clang-tools-extra/clang-nichecker/lib/Support/LegacyJarRunner.cpp`
-9. `clang-tools-extra/clang-nichecker/lib/Analysis/ProgramAnalyzer.cpp`
+8. `clang-tools-extra/clang-nichecker/lib/Passes/LazySequentializationPass.cpp`
+9. `clang-tools-extra/clang-nichecker/lib/Support/LegacyJarRunner.cpp`
+10. `clang-tools-extra/clang-nichecker/lib/Analysis/ProgramAnalyzer.cpp`
 
 ## 当前已经落地的能力
 
@@ -145,6 +146,87 @@
 1. `InterruptLoweringPass` 已经改成完全基于 `CurrentSource` 工作，不再依赖 pass 边界前的 `Result.Source`。
 2. `LoopUnrollPass` 修掉了 `while/for` 展开时多输出一个 `}` 的问题。
 
+## 2026-07 新增：native lazyseq AST 重写
+
+### 背景
+
+之前 `lazy` profile 虽然在 C++ pipeline 里保留了 `lazyseq / instrumenter / replacegoto / feeder` 这些阶段名，但真正的多线程顺序化主体还没迁到 C++。本次先迁移 `lazyseq` 的 AST 重写主体：
+
+1. 从当前 AST 收集 `main` 和 `pthread_create` 对应的线程入口。
+2. 将每个线程函数改写为由 `__cs_pc / __cs_pc_cs` 控制的语句片段。
+3. 将原始 `main` 重命名为 `main_thread`，再根据 `--rounds` 生成轮次调度器 `main`。
+4. 局部变量提升为函数静态存储，并将初始化改为受程序计数器守卫的赋值，避免分段执行后失去作用域。
+
+### 入口文件
+
+这次接通 lazy 主链路的入口主要在：
+
+1. `clang-tools-extra/clang-nichecker/lib/Passes/LazySequentializationPass.cpp`
+2. `clang-tools-extra/clang-nichecker/lib/Driver/PipelineBuilder.cpp`
+3. `clang-tools-extra/clang-nichecker/lib/Driver/Frontend.cpp`
+4. `clang-tools-extra/clang-nichecker/lib/Passes/FeederPass.cpp`
+
+### 当前行为
+
+1. `lazyseq` 已是原生 C++ pass，不再调用 Python bridge 生成源码。
+2. `Frontend` 会在 `lazyseq` 完成源码改写后重解析；因此 `lazyseq` 后面的 AST pass 看到的是当前源码，而不是初始 AST。
+3. `__CPROVER_bitvector[...]` 是后续 `instrumenter` 的后端语法；在该 pass 之前，native lazyseq 只生成标准 C 的 `unsigned` 控制变量，保持可重解析。
+4. `instrumenter` 及其之后的模块将不再要求 AST 重解析；当前 `instrumenter` 尚未迁移完成，因此 `feeder` 会明确跳过 CBMC，避免验证不完整的中间产物。
+5. 当前已覆盖默认轮次调度、直接 `pthread_create` / `pthread_join` 和线程入口的程序计数器切片；显式 schedule、context-bounded scheduler、ISR 优先级与时间约束仍待继续迁移。
+
+### 与 Python `lazyseq` 的对比结论
+
+当前 C++ `LazySequentializationPass` 不是 Python `lazyseq` 的完整等价实现，而是可重解析的第一阶段迁移。下面命令用于复现对比：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer/nichecker/Cseq
+python3 cseq.py -l lazy_until_replacegoto --input examples/lazy_unsafe.c --unwind 1 --rounds 1 -D
+
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,lazyseq --rounds=1 -print-analysis \
+  -output=/tmp/native_lazyseq.c \
+  nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
+```
+
+Python 命令的 `lazyseq` 中间产物默认写入 `nichecker/Cseq/log/*_output__lazyseq.c`；第二条命令生成 C++ 版本 `/tmp/native_lazyseq.c`。
+
+| 语义 | Python `lazyseq` | 当前 C++ `LazySequentializationPass` |
+| --- | --- | --- |
+| 线程入口 | 依赖前序 `duplicator`，调度复制后的 `thread1_0` 等入口 | 从 `ProgramSummary.ThreadEntryFunctions` 收集原始 `pthread_create` 入口 |
+| 语句切片 | 用 `IF(thread, pc, next_label)`、标签和 `goto` 表示可恢复控制流 | 用 `__cs_pc <= index < __cs_pc_cs` 守卫函数体顶层语句 |
+| `main` 与创建线程 | 改成 `main_thread`，调用 `pthread_create_2` 维护线程状态 | 改成 `main_thread`，内联改写直接 `pthread_create` 为线程状态赋值 |
+| pthread 运行时 | 注入 `lazyseqB.c` 的 create/join/lock/cond/barrier/key 模型 | 仅注入控制变量，尚未注入运行时模型 |
+| 输出元数据 | 输出 `header`、`bitwidth`、`threadsizes`、`threadendlines` 和中断字典 | 目前只在生成源码中保留线程大小数组 |
+| 调度变体 | 支持轮次、显式 schedule、contexts、norobin 及随机/事件/定时中断 | 目前仅支持默认轮次调度 |
+
+因此当前 C++ pass 已验证“改写后可重新解析”，但尚不能声称完成 Python `lazyseq` 的语义迁移。下一步应按上表先补齐标签化可恢复控制流和 `lazyseqB` pthread 运行时模型，再迁移中断调度分支。
+
+## 后续迁移记录：instrumenter
+
+### Python 入口与职责
+
+Python 实现的入口是 `nichecker/Cseq/pycparser/newParser/c_generator.py` 的 `visit_Compound()`，约在 1471 行；`nichecker/Cseq/modules/instrumenter.py` 的 `loadfromstring()` 负责准备输入参数、后端映射和最终头文件注入。
+
+`instrumenter` 不再产出需要 Clang AST 重解析的普通 C，而是将 lazyseq 的可解析中间表示降级为面向 CBMC 等后端的源码。因此 C++ pipeline 应在该 pass 之后停止重解析，只将源码交给 `replacegoto`、`mapper`、`cex` 和后端。
+
+### 算法拆分
+
+1. 后端符号映射：根据 backend 将 `__VERIFIER_assume`、断言和 nondet 原语映射到 `__CPROVER_assume`、`assert`、`nondet_*` 等目标名称。
+2. 位宽降级：消费 lazyseq 输出的 `bitwidth` 元数据，将对应整型声明改成 `unsigned __CPROVER_bitvector[k]`；同时修复 bitvector 数组初始化表达式。
+3. 原始行物化：去掉 `__CSEQ_rawline()` 包装和行标记，恢复 `IF(...)`、标签和 scheduler 中需要原样交给后端的 C 片段，并重新排版缩进。
+4. 运行时与头文件：拼接 lazyseq 传来的 `header`，再按 backend 注入 `cbmc_extra.c`、pthread 定义、系统头信息和最终文件头。
+5. `main_thread` 特化：识别事件/定时线程的 `pthread_create` 与初始化，避免在普通启动路径重复创建这些线程。
+6. `main_task_0` 特化：移除前序 unroller 引入的 `while(1)`，在事件赋值处创建事件线程，在周期计数达到约束时创建定时线程，并跳到对应标签恢复主任务。
+7. 单变量访问序：当模式为 `rww`、`wwr`、`rwr`、`wrw` 时，针对普通变量和指针分别插入读写记录、地址跟踪和断言；对循环抽象的伪读写跳过插桩。
+
+### C++ 迁移顺序
+
+1. 新建 `InstrumenterPass`，先实现后端符号映射、`__CSEQ_rawline` 物化、bitvector 声明和静态 runtime/header 拼接。
+2. 将 native lazyseq 的线程大小、位宽和标签信息扩展为 `TransformResult` 元数据，替换 Python 模块间的 `outputparam` 传递。
+3. 在 `InstrumenterPass` 中实现 `main_thread` 与 `main_task_0` 的事件/定时线程分支。
+4. 最后迁移四种单变量访问序模式，并为每种模式建立独立回归样例。
+
 ## 构建命令
 
 仓库根目录：
@@ -156,13 +238,14 @@ cd /home/ql/code/llvm_clang_static_analyzer
 稳定构建命令：
 
 ```bash
-cd /home/ql/code/llvm_clang_static_analyzer/build-csa
-ninja -j1 clang-nichecker
+cd /home/ql/code/llvm_clang_static_analyzer
+cmake -S llvm -B build-clang -G Ninja -DLLVM_ENABLE_PROJECTS='clang;clang-tools-extra'
+ninja -C build-clang -j1 clang-nichecker
 ```
 
 说明：
 
-1. `build-csa` 已经配置为 `Ninja` 生成器。
+1. 当前实际验证通过的是 `build-clang` 目录。
 2. 当前 WSL 内存较紧时，并行编译容易把多个 `cc1plus` 顶掉，所以这里优先记录 `-j1` 的稳定命令。
 
 ## 回归命令
@@ -199,19 +282,40 @@ env PATH=/home/ql/.local/java/jdk-11.0.31+11-jre/bin:/usr/local/sbin:/usr/local/
 运行命令：
 
 ```bash
-cd /home/ql/code/llvm_clang_static_analyzer
+cd /home/q/code/llvm_clang_static_analyzer
 env PATH=/home/ql/.local/java/jdk-11.0.31+11-jre/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  build-csa/bin/clang-nichecker --pipeline-profile=lazy -print-analysis \
-  -output=/tmp/lazy_reparse_refresh2.c \
+  build-clang/bin/clang-nichecker --pipeline-profile=lazy --rounds=1 --unwind=1 -print-analysis \
+  -output=/tmp/clang_nichecker_lazy_bridge.c \
   nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
 ```
 
 当前结果：
 
-1. `slice` 和 `label-insertion` 的旧 jar 调用没有被 AST 重解析机制打断。
-2. `ProgramSummary` 不会再因为中间源码形态变化而把 `lazy` 主链路误判成顺序程序。
-3. `feeder` 仍然会识别源码中残留的 `pthread_*` / `addLabel()` 等并发痕迹。
-4. 当前 `lazyseq` / `replacegoto` 真实语义还没迁完，所以这里仍然会明确跳过直接喂给 CBMC。
+1. `lazyseq` 由 C++ AST pass 原生重写，不再调用 Python bridge。
+2. 改写后的 `/tmp/native_lazyseq.c` 能通过 `build-clang/bin/clang -fsyntax-only`。
+3. `instrumenter / replacegoto` 仍在迁移中，因此当前不会把该中间产物直接交给 CBMC。
+
+### lazy 中断样例回归
+
+入口文件：
+
+1. `nichecker/Cseq/examples/_mt_mytest_3.c`
+
+运行命令：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+env PATH=/home/ql/.local/java/jdk-11.0.31+11-jre/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  build-clang/bin/clang-nichecker --pipeline-profile=lazy --rounds=1 --unwind=1 -print-analysis \
+  -output=/tmp/clang_nichecker_lazy_interrupt.c \
+  nichecker/Cseq/examples/_mt_mytest_3.c -- -I./nichecker/Cseq/core/include
+```
+
+当前结果：
+
+1. `lazyseq` 可收集 `main_task` 这类 `pthread_create` 入口并生成原生调度器。
+2. 当前版本尚未迁移 ISR 优先级、定时器和事件约束的调度语义。
+3. 当前样例 `ISR_L` 自身含有 `void` 函数中 `return NULL;` 的历史语法问题；这不是 lazyseq 改写引入的问题。
 
 ### 中断样例回归
 
@@ -243,13 +347,122 @@ clang -fsyntax-only /tmp/interrupt_reparse_refresh4.c
 
 ## 当前限制
 
-1. `lazy` 主链路还没有把旧版 `lazyseq` / `replacegoto` 的真实顺序化语义迁完。
-2. 仍然有一批旧模块只是占位映射。
-3. `CBMCDriverPass` 和 `feeder_seqprogram` 还没有补齐旧版全部参数与 counterexample 抽取逻辑。
-4. `ProgramSummary` 目前采用“稳定语义摘要 + 当前 AST 绑定字段”的折中方案；如果后续要支持更细粒度的阶段性语义切换，还需要继续拆分摘要模型。
+1. `lazyseq` 已有 C++ AST 第一版，但尚未完整覆盖 Python 版本的标签跳转、pthread runtime、元数据和中断调度语义。
+2. `slice`、`label-insertion` 按当前项目约定继续调用 legacy jar，不纳入 C++ 迁移范围。
+3. `instrumenter`、`replacegoto`、`mapper`、`cex` 已接入原生 C++ pass；其中完整 instrumenter 事件/定时器语义、mapper 的 cbmc-ext DIMACS 映射，以及 cex 的源码行映射与 witness 仍待迁移。
+4. `CBMCDriverPass` 和 `feeder_seqprogram` 还没有补齐旧版全部参数与 counterexample 抽取逻辑。
+5. `ProgramSummary` 目前采用“稳定语义摘要 + 当前 AST 绑定字段”的折中方案；如果后续要支持更细粒度的阶段性语义切换，还需要继续拆分摘要模型。
 
 ## 建议的后续推进方向
 
 1. 继续把旧链路中的真实语义模块拆成独立 C++ pass。
-2. 优先补 `lazyseq` / `replacegoto`，把多线程到顺序程序的主链路打通。
-3. 在 AST 重解析机制已经稳定的前提下，再考虑把 legacy jar 的“去函数定义再拼回去”逻辑进一步往真正的 AST 级实现靠拢。
+2. 优先补齐 native `lazyseq` 的完整 pthread runtime、元数据和事件/定时中断调度。
+3. 继续扩展 instrumenter、mapper 与 cex 的后端语义，并把当前主链路的语义差异逐项收敛到 Python 产物。
+
+## 2026-07：lazyseq 后端阶段的原生迁移与验证
+
+### 入口文件
+
+1. `clang-tools-extra/clang-nichecker/lib/Passes/LazySequentializationPass.cpp`：在仍可被 Clang 解析的阶段生成 lazy 顺序化程序、调度器和线程大小元数据。
+2. `clang-tools-extra/clang-nichecker/lib/Passes/InstrumenterPass.cpp`：物化 `__CSEQ_rawline`，映射 CBMC 原语，并将 lazy 控制变量降级为 `__CPROVER_bitvector[...]`。此 pass 及之后明确禁止 AST 重解析。
+3. `clang-tools-extra/clang-nichecker/lib/Passes/ReplaceGotoPass.cpp`：按旧 Python `replacegoto` 的两轮算法，将 `goto __exit_loop_*` 转为 PC 约束、PC 赋值和目标标签跳转。
+4. `clang-tools-extra/clang-nichecker/lib/Passes/MapperPass.cpp`：实现 mapper 默认配置下的原生跳过语义；非默认的 `cbmc-ext` DIMACS 并行映射尚待 feeder 提供符号表。
+5. `clang-tools-extra/clang-nichecker/lib/Passes/CounterexamplePass.cpp`：消费 feeder 保存的 CBMC 结果，并报告原始反例日志位置。
+6. `clang-tools-extra/clang-nichecker/test/replacegoto-input.c`：`replacegoto` 的最小回归输入。
+
+### 重写与重解析边界
+
+1. `lazyseq` 之前和 `lazyseq` 本身的输出均为标准 C，因此每次源码变化后继续通过 Clang AST 重解析。
+2. `instrumenter` 会生成 `__CPROVER_bitvector[...]`。这是 CBMC 后端语法，不是 Clang C 语法；从该模块开始，驱动只传递当前源码，不再构建新 AST。
+3. `replacegoto`、`mapper`、`feeder`、`cex` 均在后端文本阶段工作，不能重新引入 AST 依赖。
+
+### 构建与回归命令
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+
+# legacy slice/label-insertion jar 需要 WSL 原生 JDK 11。
+# 首次使用前执行一次：
+source nichecker/Cseq/java11-env.sh
+java -version
+
+# 验证 lazyseq 到 instrumenter 的后端文本转换；输出应包含
+# __CS_LAZY_INSTRUMENTED 和 __CPROVER_bitvector，且不会出现 reparse failed。
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,lazyseq,instrumenter,replacegoto,mapper \
+  --rounds=1 -print-analysis \
+  -output=/tmp/native_lazy_after_mapper.c \
+  nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
+
+# 验证 replacegoto 的 Python 等价核心规则。
+build-clang/bin/clang-nichecker \
+  --pipeline=replacegoto -print-analysis \
+  -output=/tmp/replacegoto-output.c \
+  clang-tools-extra/clang-nichecker/test/replacegoto-input.c --
+grep -n '__CPROVER_assume\|__cs_pc\|goto tworker_1' /tmp/replacegoto-output.c
+
+# 运行完整 lazy 链路。slice 和 label-insertion 仍按约定调用 legacy jar。
+build-clang/bin/clang-nichecker \
+  --pipeline-profile=lazy --rounds=1 -print-analysis \
+  -output=/tmp/native_lazy_profile.c \
+  nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
+
+# 与 Python proSlice/labelReduc 开关一致：只有显式启用时才调用 jar。
+# slice-var 与 slice-mode 对应 Python modefile 中的 globalVariable/mode。
+build-clang/bin/clang-nichecker \
+  --pipeline-profile=lazy --pro-slice --label-reduc \
+  --slice-var=data --slice-mode=rww --rounds=1 -print-analysis \
+  -output=/tmp/native_lazy_with_jar.c \
+  nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
+
+# Python mapper 等价的 DIMACS 分片。cores 必须是 2 的幂。
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,lazyseq,instrumenter,replacegoto,mapper,feeder,cex \
+  --backend=cbmc-ext --contexts=1 --cores=4 --rounds=1 -print-analysis \
+  -output=/tmp/native_lazy_dimacs4.c \
+  nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
+```
+
+### Python 与 C++ 对比调试方法
+
+迁移任一模块时，必须比较 Python 链路和 C++ 链路在该模块结束后的源码，而不是只比较最终 CBMC 结论：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer/nichecker/Cseq
+python3 cseq.py -l lazy_until_replacegoto \
+  --input examples/lazy_unsafe.c --unwind 1 --rounds 1 -D
+
+# Python 产物位于 log/*_output__<模块名>.c，例如：
+# log/_19_output__lazyseq.c、log/_20_output__instrumenter.c、
+# log/_21_output__replacegoto.c。
+
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,lazyseq,instrumenter,replacegoto \
+  --rounds=1 -output=/tmp/native_after_replacegoto.c \
+  nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
+diff -u nichecker/Cseq/log/_21_output__replacegoto.c \
+  /tmp/native_after_replacegoto.c
+```
+
+对比时按语义检查线程入口、PC 宽度、标签/跳转、pthread 运行时和后端头文件，不要求变量命名、排版或运行时实现细节完全一致。若 Python 产物已经含 `__CPROVER_bitvector[...]`，不要把它再次交给 Clang 解析；应将其作为 instrumenter 之后的纯文本后端产物比较。
+
+### JDK 11 配置
+
+legacy jar 只能使用 WSL 原生 JDK 11；Windows `java.exe` 在临时工作目录执行 `java -jar` 时会错误地报告主类不存在。当前用户级安装位置为 `/home/q/.local/java/openjdk11/usr/lib/jvm/java-11-openjdk-amd64`，入口脚本为 `nichecker/Cseq/java11-env.sh`。每个新 shell 在运行含 `slice` 或 `label-insertion` 的链路前都应执行：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+source nichecker/Cseq/java11-env.sh
+java -version
+```
+
+已用 OpenJDK 11.0.31 验证 jar 可启动。若完整 lazy 链路仍在 `lazyseq` 提示找不到 `main`，应检查 jar 工作目录中的 `data.json`：旧 Python 链路传递的是选定的单一 `globalVariable`，当前 C++ `SlicePass` 仍传递全局变量列表，这会使 jar 产生不完整的切片结果；该问题与 JDK 配置无关。
+
+### 当前限制
+
+1. `lazyseq` 已迁移可重解析的调度、PC 切片和基础 pthread 运行时，但尚未等价覆盖 Python 的完整 `lazyseqB.c`、事件/定时中断和全部调度变体。
+2. `instrumenter` 已覆盖 rawline 物化、CBMC 基础符号映射和 lazy 控制变量位宽；Python 中单变量访问序、事件/定时器和完整头文件拼接仍待迁移。
+3. `mapper` 已支持 `--backend=cbmc-ext --contexts>0 --cores=2^n`：生成 DIMACS，映射 `__cs_thread_index` 的命题位，并由 feeder 验证全部分片。当前分片按顺序执行，尚未迁移 Python feeder 的多进程并发调度；可用 `--reuse-dimacs` 复用同名 DIMACS 文件。
+4. `cex` 已接收并报告 CBMC 原始轨迹；旧 Python 的源码行映射与 SV-COMP witness 生成尚待迁移。

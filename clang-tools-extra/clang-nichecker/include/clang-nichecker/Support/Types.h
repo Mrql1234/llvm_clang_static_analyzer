@@ -36,8 +36,17 @@ struct PipelineOptions {
   std::string PipelineSpec;
   std::string PipelineProfile;
   unsigned Unwind = 1;
+  unsigned Rounds = 1;
   unsigned UnwindWhile = 1;
   unsigned UnwindFor = 1;
+  unsigned Contexts = 0;
+  unsigned Cores = 1;
+  std::string Backend = "cbmc";
+  std::string SliceVariable;
+  std::string SliceMode;
+  bool ReuseDimacs = false;
+  bool EnableLegacySliceJar = false;
+  bool EnableLegacyLabelJar = false;
   bool PrintAnalysis = false;
   bool EnableCBMC = false;
 };
@@ -53,6 +62,11 @@ struct TransformResult {
   std::string Source;
   std::vector<std::string> Notes;
   std::vector<TextReplacement> PendingReplacements;
+  std::vector<std::string> BackendAssumptions;
+  std::string BackendOutput;
+  std::string BackendLogPath;
+  std::string BackendOutcome;
+  bool RequiresASTReparse = true;
 };
 
 class TranslationUnitHandle {

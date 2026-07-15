@@ -1,13 +1,18 @@
 #include "clang-nichecker/Driver/PipelineBuilder.h"
 #include "clang-nichecker/Backend/CBMCDriverPass.h"
 #include "clang-nichecker/Passes/ConditionExtractionPass.h"
+#include "clang-nichecker/Passes/CounterexamplePass.h"
 #include "clang-nichecker/Passes/FeederPass.h"
 #include "clang-nichecker/Passes/FeederSeqProgramPass.h"
+#include "clang-nichecker/Passes/InstrumenterPass.h"
 #include "clang-nichecker/Passes/InterruptLoweringPass.h"
 #include "clang-nichecker/Passes/LegacyModulePass.h"
 #include "clang-nichecker/Passes/LabelInsertionPass.h"
+#include "clang-nichecker/Passes/LazySequentializationPass.h"
 #include "clang-nichecker/Passes/LoopUnrollPass.h"
+#include "clang-nichecker/Passes/MapperPass.h"
 #include "clang-nichecker/Passes/ProgramClassifierPass.h"
+#include "clang-nichecker/Passes/ReplaceGotoPass.h"
 #include "clang-nichecker/Passes/SequentializationPass.h"
 #include "clang-nichecker/Passes/SlicePass.h"
 #include "clang-nichecker/Passes/SliceSeqProgramPass.h"
@@ -57,6 +62,9 @@ StringMap<PassFactory> buildRegistry() {
   Registry["sequentialization"] = [] {
     return std::make_unique<SequentializationPass>();
   };
+  Registry["lazyseq"] = [] {
+    return std::make_unique<LazySequentializationPass>();
+  };
   Registry["source-emission"] = [] {
     return std::make_unique<SourceEmissionPass>();
   };
@@ -64,13 +72,18 @@ StringMap<PassFactory> buildRegistry() {
   Registry["feeder_seqprogram"] = [] {
     return std::make_unique<FeederSeqProgramPass>();
   };
+  Registry["instrumenter"] = [] {
+    return std::make_unique<InstrumenterPass>();
+  };
+  Registry["replacegoto"] = [] { return std::make_unique<ReplaceGotoPass>(); };
+  Registry["mapper"] = [] { return std::make_unique<MapperPass>(); };
+  Registry["cex"] = [] { return std::make_unique<CounterexamplePass>(); };
   Registry["cbmc-driver"] = [] { return std::make_unique<CBMCDriverPass>(); };
 
   Registry["conditionextractor"] = Registry["condition-extraction"];
   Registry["varnames"] = Registry["variable-renaming"];
   Registry["unroller"] = Registry["loop-unroll"];
   Registry["insertLabel"] = Registry["label-insertion"];
-  Registry["lazyseq"] = Registry["sequentialization"];
 
   Registry["workarounds"] =
       makeLegacyFactory("workarounds", "legacy placeholder: workarounds");
@@ -97,12 +110,6 @@ StringMap<PassFactory> buildRegistry() {
       makeLegacyFactory("duplicator", "legacy placeholder: duplicator");
   Registry["condwaitconverter"] = makeLegacyFactory(
       "condwaitconverter", "legacy placeholder: condwaitconverter");
-  Registry["instrumenter"] =
-      makeLegacyFactory("instrumenter", "legacy placeholder: instrumenter");
-  Registry["replacegoto"] =
-      makeLegacyFactory("replacegoto", "legacy placeholder: replacegoto");
-  Registry["mapper"] = makeLegacyFactory("mapper", "legacy placeholder: mapper");
-  Registry["cex"] = makeLegacyFactory("cex", "legacy placeholder: cex");
 
   Registry["stddeclinjector"] = makeLegacyFactory(
       "stddeclinjector", "legacy placeholder: stddeclinjector");

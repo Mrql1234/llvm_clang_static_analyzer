@@ -6,7 +6,6 @@
 #include "llvm/Support/JSON.h"
 
 #include <string>
-#include <vector>
 
 using namespace clang;
 using namespace llvm;
@@ -19,31 +18,17 @@ bool shouldRunSliceJar(const PipelineOptions &Options,
                        const TransformResult &Result) {
   if (Result.Summary.Kind == ProgramKind::Sequential)
     return false;
-  if (Options.PipelineProfile == "lazy")
-    return true;
-  return StringRef(Options.PipelineSpec).contains("slice");
-}
-
-std::string collectGlobalVariables(ASTContext &AST) {
-  std::vector<std::string> Names;
-  for (Decl *D : AST.getTranslationUnitDecl()->decls()) {
-    const auto *VD = dyn_cast<VarDecl>(D);
-    if (!VD || !VD->hasGlobalStorage() || VD->isStaticDataMember())
-      continue;
-    if (!VD->getName().empty())
-      Names.push_back(VD->getNameAsString());
-  }
-  return joinList(Names);
+  return Options.EnableLegacySliceJar &&
+         (Options.PipelineProfile == "lazy" ||
+          StringRef(Options.PipelineSpec).contains("slice"));
 }
 
 std::string buildSliceDataJson(const PipelineContext &Context,
                                const TransformResult &Result) {
   json::Object Root;
-  Root["var"] = collectGlobalVariables(Context.getASTContext());
+  Root["var"] = Context.Options.SliceVariable;
   Root["age"] = 30;
-  Root["mode"] = Result.Summary.Kind == ProgramKind::InterruptDriven ? "isr"
-                  : Result.Summary.Kind == ProgramKind::MultiThreaded  ? "mt"
-                                                                      : "";
+  Root["mode"] = Context.Options.SliceMode;
   Root["main_task"] = 0;
 
   int Priority = 1;
@@ -60,7 +45,7 @@ llvm::Error SlicePass::run(const PipelineContext &Context,
                            TransformResult &Result) const {
   if (!shouldRunSliceJar(Context.Options, Result)) {
     Result.Notes.push_back(
-        "phase4: slice 当前仅在非顺序程序的 lazy/显式 slice 链路启用，其余场景保持源码不变");
+        "phase4: slice 按 Python 默认 proSlice=false 跳过 legacy jar，保持源码不变");
     return Error::success();
   }
 

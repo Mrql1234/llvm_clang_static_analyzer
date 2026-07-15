@@ -67,8 +67,24 @@ std::string detectEntryFunction(StringRef Source) {
 }
 
 bool containsUnresolvedConcurrencyArtifacts(StringRef Source) {
+  if (Source.contains("__CS_LAZY_INSTRUMENTED"))
+    return false;
+
+  bool LooksLikeSequentializedLazyModel =
+      Source.contains("__CPROVER_bitvector") &&
+      Source.contains("__cs_thread_index") && Source.contains("__cs_pc[") &&
+      Source.contains("__cs_pc_cs[") && Source.contains("main_thread(");
+
+  if (LooksLikeSequentializedLazyModel)
+    return Source.contains("pthread_create(") || Source.contains("addLabel(");
+
   return Source.contains("pthread_create") || Source.contains("pthread_join") ||
          Source.contains("pthread_mutex_") || Source.contains("addLabel(");
+}
+
+bool needsLazyInstrumentation(StringRef Source) {
+  return Source.contains("__cs_pc[") &&
+         !Source.contains("__CS_LAZY_INSTRUMENTED");
 }
 
 Expected<SmallString<256>> createWorkDir(StringRef OutputPath) {
@@ -106,6 +122,11 @@ llvm::Error FeederPass::run(const PipelineContext &Context,
   }
 
   std::string Source = materializeSource(Context, Result);
+  if (needsLazyInstrumentation(Source)) {
+    Result.Notes.push_back(
+        "phase6: feeder 检测到 native lazyseq 产物尚未经过 instrumenter，已跳过 CBMC");
+    return Error::success();
+  }
   std::string EntryFunction = detectEntryFunction(Source);
   if (EntryFunction.empty()) {
     Result.Notes.push_back(
@@ -139,6 +160,7 @@ llvm::Error FeederPass::run(const PipelineContext &Context,
 
   CBMCRunConfig Config;
   Config.SourceFilePath = std::string(SourcePath);
+  Config.Backend = Context.Options.Backend;
   Config.EntryFunction = EntryFunction;
   Config.Unwind = Context.Options.Unwind ? Context.Options.Unwind : 1;
   Config.BoundsCheck = true;
@@ -148,6 +170,40 @@ llvm::Error FeederPass::run(const PipelineContext &Context,
   Config.Trace = true;
   Config.NoLibrary = true;
   Config.ObjectBits = 10;
+
+  if (!Result.BackendAssumptions.empty()) {
+    std::string CombinedOutput;
+    VerificationOutcome Outcome = VerificationOutcome::Safe;
+    std::string LastLog;
+    for (size_t Index = 0; Index < Result.BackendAssumptions.size(); ++Index) {
+      Config.ExtraArgs = {"--assume", Result.BackendAssumptions[Index]};
+      Expected<CBMCRunResult> Partition =
+          runCBMC(Config, formatv("{0}.partition{1}", LogBase, Index).str());
+      if (!Partition) {
+        Result.Notes.push_back(
+            formatv("phase6: feeder 无法运行 DIMACS 分片 {0}；原因: {1}", Index,
+                    toString(Partition.takeError()))
+                .str());
+        return Error::success();
+      }
+      CombinedOutput += Partition->CombinedOutput;
+      LastLog = Partition->CombinedLogPath;
+      if (Partition->Outcome == VerificationOutcome::Unsafe) {
+        Outcome = VerificationOutcome::Unsafe;
+        break;
+      }
+      if (Partition->Outcome == VerificationOutcome::Unknown)
+        Outcome = VerificationOutcome::Unknown;
+    }
+    Result.BackendOutput = std::move(CombinedOutput);
+    Result.BackendLogPath = std::move(LastLog);
+    Result.BackendOutcome = verificationOutcomeToString(Outcome).str();
+    Result.Notes.push_back(
+        formatv("phase6: feeder 已验证 {0} 个 DIMACS 分片，汇总结果 {1}",
+                Result.BackendAssumptions.size(), Result.BackendOutcome)
+            .str());
+    return Error::success();
+  }
 
   Expected<CBMCRunResult> Run = runCBMC(Config, LogBase);
   if (!Run) {
@@ -173,6 +229,9 @@ llvm::Error FeederPass::run(const PipelineContext &Context,
               verificationOutcomeToString(Run->Outcome), Run->ExitCode,
               Run->CombinedLogPath)
           .str());
+  Result.BackendOutput = std::move(Run->CombinedOutput);
+  Result.BackendLogPath = Run->CombinedLogPath;
+  Result.BackendOutcome = verificationOutcomeToString(Run->Outcome).str();
   return Error::success();
 }
 

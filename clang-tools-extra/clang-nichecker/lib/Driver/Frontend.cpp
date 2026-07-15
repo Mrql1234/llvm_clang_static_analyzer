@@ -126,6 +126,8 @@ public:
 
       if (!SourceChanged)
         continue;
+      if (!Result.RequiresASTReparse)
+        continue;
 
       llvm::Expected<std::unique_ptr<ASTUnit>> ReparsedOrErr =
           reparseTranslationUnit(CI, BaseInvocation, CurrentSource);
