@@ -498,6 +498,23 @@ java -version
 3. `mapper` 已支持 `--backend=cbmc-ext --contexts>0 --cores=2^n`：生成 DIMACS，映射 `__cs_thread_index` 的命题位，并由 feeder 验证全部分片。当前分片按顺序执行，尚未迁移 Python feeder 的多进程并发调度；可用 `--reuse-dimacs` 复用同名 DIMACS 文件。
 4. `cex` 已接收并报告 CBMC 原始轨迹；旧 Python 的源码行映射与 SV-COMP witness 生成尚待迁移。
 
+### 2026-08：pthread 条件变量与屏障 runtime
+
+`clang-tools-extra/clang-nichecker/lib/Passes/LazySequentializationPass.cpp` 现在原生注入了 Python `lazyseqB.c` 的条件变量/屏障核心状态：条件变量由地址槽和信号状态表示，`pthread_cond_wait_1` 解锁 mutex，`pthread_cond_wait_2` 假设已被 signal/broadcast 后重新上锁；屏障记录地址、初始计数和当前计数，分别由 `_wait_1` 递减、`_wait_2` 等待归零并复位。`condwaitconverter` 的 `_1/_2` 调用会在 `lazyseq` 中显式改写为这些内部 runtime 函数。
+
+回归入口为 `clang-tools-extra/clang-nichecker/test/lazy-runtime-input.c`，运行命令如下：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,condwaitconverter,lazyseq,instrumenter \
+  --rounds=1 -output=/tmp/lazy-runtime-backend.c \
+  clang-tools-extra/clang-nichecker/test/lazy-runtime-input.c --
+grep -n '__cs_pthread_cond_wait_1\|__cs_pthread_cond_wait_2\|__cs_pthread_cond_signal' \
+  /tmp/lazy-runtime-backend.c
+```
+
 ## 2026-08：lazy 前序规范化 pass
 
 ### 入口文件

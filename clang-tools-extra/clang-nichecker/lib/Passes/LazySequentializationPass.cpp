@@ -80,6 +80,13 @@ const CallExpr *getDirectCall(const Stmt *Node) {
   return dyn_cast<CallExpr>(ExprNode);
 }
 
+std::string getCalleeName(const CallExpr *Call, const PipelineContext &Context) {
+  if (const FunctionDecl *Callee = Call->getDirectCallee())
+    return Callee->getNameAsString();
+  std::optional<std::string> Name = sourceText(Call->getCallee(), Context);
+  return Name ? *Name : "";
+}
+
 const FunctionDecl *functionFromThreadStartArgument(const CallExpr *Call) {
   if (!Call || Call->getNumArgs() < 3)
     return nullptr;
@@ -137,6 +144,13 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans) {
   OS << "};\n";
   OS << "static void *__cs_lock_address[" << LockSlots << "] = {0};\n";
   OS << "static unsigned __cs_lock_owner[" << LockSlots << "] = {0};\n\n";
+  OS << "static void *__cs_cond_address[" << LockSlots << "] = {0};\n";
+  OS << "static unsigned __cs_cond_state[" << LockSlots << "] = {0};\n";
+  OS << "static void *__cs_barrier_address[" << LockSlots << "] = {0};\n";
+  OS << "static unsigned __cs_barrier_initial[" << LockSlots << "] = {0};\n";
+  OS << "static unsigned __cs_barrier_current[" << LockSlots << "] = {0};\n\n";
+  OS << "static void __cs_pthread_mutex_lock(void *Address);\n";
+  OS << "static void __cs_pthread_mutex_unlock(void *Address);\n\n";
   OS << "#define __CS_LAZY_IF(T, A, B) \\\n";
   OS << "  if ((__cs_pc[(T)] > (A)) || ((A) >= __cs_pc_cs[(T)])) goto B\n";
   OS << "#define __CS_PTHREAD_CREATE(NewThread, Attr, Start, Arg, Id) \\\n";
@@ -149,8 +163,50 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans) {
   OS << "      __cs_lock_address[Index] = Address;\n";
   OS << "      return Index;\n    }\n  }\n";
   OS << "  return 0;\n}\n\n";
+  OS << "static unsigned __cs_cond_slot(void *Address)\n{\n";
+  OS << "  unsigned Index;\n";
+  OS << "  for (Index = 0; Index < " << LockSlots << "; ++Index) {\n";
+  OS << "    if (__cs_cond_address[Index] == Address || !__cs_cond_address[Index]) {\n";
+  OS << "      __cs_cond_address[Index] = Address;\n";
+  OS << "      return Index;\n    }\n  }\n";
+  OS << "  return 0;\n}\n\n";
+  OS << "static unsigned __cs_barrier_slot(void *Address)\n{\n";
+  OS << "  unsigned Index;\n";
+  OS << "  for (Index = 0; Index < " << LockSlots << "; ++Index) {\n";
+  OS << "    if (__cs_barrier_address[Index] == Address || !__cs_barrier_address[Index]) {\n";
+  OS << "      __cs_barrier_address[Index] = Address;\n";
+  OS << "      return Index;\n    }\n  }\n";
+  OS << "  return 0;\n}\n\n";
   OS << "static void __cs_pthread_mutex_init(void *Address)\n{\n";
   OS << "  __cs_lock_owner[__cs_lock_slot(Address)] = 0;\n}\n\n";
+  OS << "static void __cs_pthread_cond_init(void *Address)\n{\n";
+  OS << "  __cs_cond_state[__cs_cond_slot(Address)] = 0;\n}\n\n";
+  OS << "static void __cs_pthread_cond_destroy(void *Address)\n{\n";
+  OS << "  __cs_cond_state[__cs_cond_slot(Address)] = 0;\n}\n\n";
+  OS << "static void __cs_pthread_cond_wait_1(void *Condition, void *Mutex)\n{\n";
+  OS << "  (void)Condition;\n  __cs_pthread_mutex_unlock(Mutex);\n}\n\n";
+  OS << "static void __cs_pthread_cond_wait_2(void *Condition, void *Mutex)\n{\n";
+  OS << "  __VERIFIER_assume(__cs_cond_state[__cs_cond_slot(Condition)] == 1);\n";
+  OS << "  __cs_pthread_mutex_lock(Mutex);\n}\n\n";
+  OS << "static void __cs_pthread_cond_signal(void *Condition)\n{\n";
+  OS << "  __cs_cond_state[__cs_cond_slot(Condition)] = 1;\n}\n\n";
+  OS << "static void __cs_pthread_cond_broadcast(void *Condition)\n{\n";
+  OS << "  __cs_cond_state[__cs_cond_slot(Condition)] = 1;\n}\n\n";
+  OS << "static void __cs_pthread_barrier_init(void *Address, unsigned Count)\n{\n";
+  OS << "  unsigned Slot = __cs_barrier_slot(Address);\n";
+  OS << "  __cs_barrier_initial[Slot] = Count;\n";
+  OS << "  __cs_barrier_current[Slot] = Count;\n}\n\n";
+  OS << "static void __cs_pthread_barrier_destroy(void *Address)\n{\n";
+  OS << "  unsigned Slot = __cs_barrier_slot(Address);\n";
+  OS << "  __cs_barrier_initial[Slot] = 0;\n  __cs_barrier_current[Slot] = 0;\n}\n\n";
+  OS << "static void __cs_pthread_barrier_wait_1(void *Address)\n{\n";
+  OS << "  unsigned Slot = __cs_barrier_slot(Address);\n";
+  OS << "  __VERIFIER_assume(__cs_barrier_current[Slot] > 0);\n";
+  OS << "  --__cs_barrier_current[Slot];\n}\n\n";
+  OS << "static void __cs_pthread_barrier_wait_2(void *Address)\n{\n";
+  OS << "  unsigned Slot = __cs_barrier_slot(Address);\n";
+  OS << "  __VERIFIER_assume(__cs_barrier_current[Slot] == 0);\n";
+  OS << "  __cs_barrier_current[Slot] = __cs_barrier_initial[Slot];\n}\n\n";
   OS << "static void __cs_pthread_mutex_lock(void *Address)\n{\n";
   OS << "  unsigned Slot = __cs_lock_slot(Address);\n";
   OS << "  __VERIFIER_assume(__cs_lock_owner[Slot] == 0);\n";
@@ -367,8 +423,7 @@ std::string rewriteFunctionBody(
     }
 
     if (const CallExpr *Call = getDirectCall(Statement)) {
-      const FunctionDecl *Callee = Call->getDirectCallee();
-      StringRef CalleeName = Callee ? Callee->getName() : "";
+      const std::string CalleeName = getCalleeName(Call, Context);
       if (CalleeName == "pthread_create") {
         const FunctionDecl *Entry = functionFromThreadStartArgument(Call);
         auto It = Entry ? ThreadIndices.find(Entry->getName()) : ThreadIndices.end();
@@ -398,6 +453,35 @@ std::string rewriteFunctionBody(
         }
       } else if (CalleeName == "pthread_exit") {
         Rewritten = "return;";
+      } else if (CalleeName == "pthread_cond_init" ||
+                 CalleeName == "pthread_cond_destroy" ||
+                 CalleeName == "pthread_cond_signal" ||
+                 CalleeName == "pthread_cond_broadcast" ||
+                 CalleeName == "pthread_barrier_destroy" ||
+                 CalleeName == "pthread_barrier_wait_1" ||
+                 CalleeName == "pthread_barrier_wait_2") {
+        if (Call->getNumArgs() >= 1)
+          if (std::optional<std::string> Address = sourceText(Call->getArg(0), Context)) {
+            std::string RuntimeName = "__cs_" + CalleeName;
+            Rewritten = RuntimeName + "((void *)" + *Address + ");";
+          }
+      } else if (CalleeName == "pthread_cond_wait_1" ||
+                 CalleeName == "pthread_cond_wait_2") {
+        if (Call->getNumArgs() >= 2) {
+          std::optional<std::string> Condition = sourceText(Call->getArg(0), Context);
+          std::optional<std::string> Mutex = sourceText(Call->getArg(1), Context);
+          if (Condition && Mutex)
+            Rewritten = "__cs_" + CalleeName + "((void *)" + *Condition +
+                        ", (void *)" + *Mutex + ");";
+        }
+      } else if (CalleeName == "pthread_barrier_init") {
+        if (Call->getNumArgs() >= 3) {
+          std::optional<std::string> Address = sourceText(Call->getArg(0), Context);
+          std::optional<std::string> Count = sourceText(Call->getArg(2), Context);
+          if (Address && Count)
+            Rewritten = "__cs_pthread_barrier_init((void *)" + *Address +
+                        ", (unsigned)(" + *Count + "));";
+        }
       }
     }
 
