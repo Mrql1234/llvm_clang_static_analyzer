@@ -18,6 +18,7 @@ enum class UpdateKind { Add, Sub, Reset, Unknown };
 struct Update {
   UpdateKind Kind;
   std::string Value;
+  const Expr *Expression = nullptr;
 };
 
 struct VariableInfo {
@@ -85,7 +86,7 @@ public:
     // ++x/x++ and their decrement counterparts are read-modify-write.
     Info.Read = true;
     Info.Updates.push_back(
-        {Operator->isIncrementOp() ? UpdateKind::Add : UpdateKind::Sub, "1"});
+        {Operator->isIncrementOp() ? UpdateKind::Add : UpdateKind::Sub, "1", nullptr});
     return true;
   }
 
@@ -163,27 +164,27 @@ private:
   Update classifyAssignment(const VarDecl *Decl,
                             const BinaryOperator *Operator) const {
     if (Operator->getOpcode() == BO_AddAssign)
-      return {UpdateKind::Add, text(Operator->getRHS())};
+      return {UpdateKind::Add, text(Operator->getRHS()), Operator->getRHS()};
     if (Operator->getOpcode() == BO_SubAssign)
-      return {UpdateKind::Sub, text(Operator->getRHS())};
+      return {UpdateKind::Sub, text(Operator->getRHS()), Operator->getRHS()};
     if (Operator->getOpcode() != BO_Assign)
-      return {UpdateKind::Unknown, ""};
+      return {UpdateKind::Unknown, "", nullptr};
 
     const Expr *Right = Operator->getRHS()->IgnoreParenImpCasts();
     if (!references(Right, Decl))
-      return {UpdateKind::Reset, text(Right)};
+      return {UpdateKind::Reset, text(Right), Right};
     const auto *Binary = dyn_cast<BinaryOperator>(Right);
     if (!Binary)
       return {UpdateKind::Unknown, ""};
     if (Binary->getOpcode() == BO_Add) {
       if (references(Binary->getLHS(), Decl))
-        return {UpdateKind::Add, text(Binary->getRHS())};
+        return {UpdateKind::Add, text(Binary->getRHS()), Binary->getRHS()};
       if (references(Binary->getRHS(), Decl))
-        return {UpdateKind::Add, text(Binary->getLHS())};
+        return {UpdateKind::Add, text(Binary->getLHS()), Binary->getLHS()};
     }
     if (Binary->getOpcode() == BO_Sub && references(Binary->getLHS(), Decl))
-      return {UpdateKind::Sub, text(Binary->getRHS())};
-    return {UpdateKind::Unknown, ""};
+      return {UpdateKind::Sub, text(Binary->getRHS()), Binary->getRHS()};
+    return {UpdateKind::Unknown, "", nullptr};
   }
 
   ASTContext &Context;
@@ -267,11 +268,14 @@ private:
 
   bool referencesAny(const Update &Update,
                      const std::vector<VariableInfo> &Variables) const {
-    if (Update.Value.empty())
+    if (!Update.Expression)
       return false;
-    for (const VariableInfo &Variable : Variables)
-      if (StringRef(Update.Value).contains(Variable.Decl->getName()))
+    for (const VariableInfo &Variable : Variables) {
+      DeclReferenceFinder Finder(Variable.Decl);
+      Finder.TraverseStmt(const_cast<Expr *>(Update.Expression));
+      if (Finder.found())
         return true;
+    }
     return false;
   }
 

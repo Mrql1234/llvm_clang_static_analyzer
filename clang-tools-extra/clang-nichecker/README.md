@@ -277,7 +277,7 @@ cd /home/q/code/llvm_clang_static_analyzer/nichecker/Cseq
 python3 cseq.py -l lazy --input /tmp/loop-input.c --unwind 1 --rounds 1 -D
 ```
 
-Python 的中间输出位于 `nichecker/Cseq/log/*_output__LoopAbstraction.c`；将其与 `/tmp/lazy-loop-abs-native.c` 对比保存变量、nondet 约束、循环体和末尾否定条件约束。对比关注语义结构，不以变量编号或排版差异作为不一致依据。
+Python 的中间输出位于 `nichecker/Cseq/log/*_output__LoopAbstraction.c`；将其与 `/tmp/lazy-loop-abs-native.c` 对比保存变量、nondet 约束、循环体和末尾否定条件约束。对比关注语义结构，不以变量编号或排版差异作为不一致依据。归纳变量依赖关系使用 AST `DeclRefExpr` 判定而非字符串匹配，回归输入中的 `i += initial` 用于防止 `i` 被错误地视为 `initial` 的子串。
 
 ## 回归命令
 
