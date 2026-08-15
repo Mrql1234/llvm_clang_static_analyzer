@@ -60,6 +60,14 @@ static cl::opt<unsigned>
     CoresOpt("cores", cl::cat(ClangNICheckerCategory),
              cl::desc("mapper 并行分支数"), cl::init(1));
 
+static cl::opt<unsigned>
+    ThreadsOpt("threads", cl::cat(ClangNICheckerCategory),
+               cl::desc("pthread_create 静态创建上界，0 表示不限制"), cl::init(0));
+
+static cl::opt<bool>
+    EnableLoopAbstractionOpt("loop-abs", cl::cat(ClangNICheckerCategory),
+                             cl::desc("启用 lazy.chain 的 LoopAbstraction 循环摘要"));
+
 static cl::opt<std::string>
     BackendOpt("backend", cl::cat(ClangNICheckerCategory),
                cl::desc("后端名称，例如 cbmc 或 cbmc-ext"), cl::init("cbmc"));
@@ -124,6 +132,8 @@ int main(int argc, const char **argv) {
   Options.Rounds = RoundsOpt;
   Options.Contexts = ContextsOpt;
   Options.Cores = CoresOpt;
+  Options.Threads = ThreadsOpt;
+  Options.EnableLoopAbstraction = EnableLoopAbstractionOpt;
   Options.Backend = BackendOpt;
   Options.EnableLegacySliceJar = EnableLegacySliceJarOpt;
   Options.EnableLegacyLabelJar = EnableLegacyLabelJarOpt;

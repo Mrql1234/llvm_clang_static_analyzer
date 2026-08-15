@@ -1,18 +1,26 @@
 #include "clang-nichecker/Driver/PipelineBuilder.h"
 #include "clang-nichecker/Backend/CBMCDriverPass.h"
 #include "clang-nichecker/Passes/ConditionExtractionPass.h"
+#include "clang-nichecker/Passes/ConstantsPass.h"
+#include "clang-nichecker/Passes/CondWaitConverterPass.h"
 #include "clang-nichecker/Passes/CounterexamplePass.h"
 #include "clang-nichecker/Passes/DoWhileConverterPass.h"
+#include "clang-nichecker/Passes/DuplicatorPass.h"
 #include "clang-nichecker/Passes/FeederPass.h"
 #include "clang-nichecker/Passes/FeederSeqProgramPass.h"
+#include "clang-nichecker/Passes/FunctionTrackerPass.h"
 #include "clang-nichecker/Passes/InstrumenterPass.h"
+#include "clang-nichecker/Passes/InlinerPass.h"
 #include "clang-nichecker/Passes/InterruptLoweringPass.h"
 #include "clang-nichecker/Passes/LegacyModulePass.h"
 #include "clang-nichecker/Passes/LabelInsertionPass.h"
 #include "clang-nichecker/Passes/LazySequentializationPass.h"
 #include "clang-nichecker/Passes/LoopUnrollPass.h"
+#include "clang-nichecker/Passes/LoopAbstractionPass.h"
 #include "clang-nichecker/Passes/MapperPass.h"
 #include "clang-nichecker/Passes/ProgramClassifierPass.h"
+#include "clang-nichecker/Passes/PreinstrumenterPass.h"
+#include "clang-nichecker/Passes/PreInlinerPass.h"
 #include "clang-nichecker/Passes/ReplaceGotoPass.h"
 #include "clang-nichecker/Passes/SequentializationPass.h"
 #include "clang-nichecker/Passes/SelfOperationPass.h"
@@ -20,7 +28,9 @@
 #include "clang-nichecker/Passes/SliceSeqProgramPass.h"
 #include "clang-nichecker/Passes/SourceEmissionPass.h"
 #include "clang-nichecker/Passes/SpinlockPass.h"
+#include "clang-nichecker/Passes/SwitchTransformerPass.h"
 #include "clang-nichecker/Passes/VariableRenamingPass.h"
+#include "clang-nichecker/Passes/WorkaroundsPass.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 
@@ -83,6 +93,23 @@ StringMap<PassFactory> buildRegistry() {
     return std::make_unique<DoWhileConverterPass>();
   };
   Registry["selfop"] = [] { return std::make_unique<SelfOperationPass>(); };
+  Registry["preinstrumenter"] = [] {
+    return std::make_unique<PreinstrumenterPass>();
+  };
+  Registry["condwaitconverter"] = [] {
+    return std::make_unique<CondWaitConverterPass>();
+  };
+  Registry["duplicator"] = [] { return std::make_unique<DuplicatorPass>(); };
+  Registry["functiontracker"] = [] {
+    return std::make_unique<FunctionTrackerPass>();
+  };
+  Registry["switchtransformer"] = [] {
+    return std::make_unique<SwitchTransformerPass>();
+  };
+  Registry["preinliner"] = [] { return std::make_unique<PreInlinerPass>(); };
+  Registry["inliner"] = [] { return std::make_unique<InlinerPass>(); };
+  Registry["workarounds"] = [] { return std::make_unique<WorkaroundsPass>(); };
+  Registry["constants"] = [] { return std::make_unique<ConstantsPass>(); };
   Registry["replacegoto"] = [] { return std::make_unique<ReplaceGotoPass>(); };
   Registry["mapper"] = [] { return std::make_unique<MapperPass>(); };
   Registry["cex"] = [] { return std::make_unique<CounterexamplePass>(); };
@@ -93,26 +120,9 @@ StringMap<PassFactory> buildRegistry() {
   Registry["unroller"] = Registry["loop-unroll"];
   Registry["insertLabel"] = Registry["label-insertion"];
 
-  Registry["workarounds"] =
-      makeLegacyFactory("workarounds", "legacy placeholder: workarounds");
-  Registry["functiontracker"] =
-      makeLegacyFactory("functiontracker", "legacy placeholder: functiontracker");
-  Registry["preinstrumenter"] =
-      makeLegacyFactory("preinstrumenter", "legacy placeholder: preinstrumenter");
-  Registry["preinliner"] =
-      makeLegacyFactory("preinliner", "legacy placeholder: preinliner");
-  Registry["inliner"] =
-      makeLegacyFactory("inliner", "legacy placeholder: inliner");
-  Registry["switchtransformer"] = makeLegacyFactory(
-      "switchtransformer", "legacy placeholder: switchtransformer");
-  Registry["LoopAbstraction"] = makeLegacyFactory(
-      "LoopAbstraction", "legacy placeholder: LoopAbstraction");
-  Registry["constants"] =
-      makeLegacyFactory("constants", "legacy placeholder: constants");
-  Registry["duplicator"] =
-      makeLegacyFactory("duplicator", "legacy placeholder: duplicator");
-  Registry["condwaitconverter"] = makeLegacyFactory(
-      "condwaitconverter", "legacy placeholder: condwaitconverter");
+  Registry["LoopAbstraction"] = [] {
+    return std::make_unique<LoopAbstractionPass>();
+  };
 
   Registry["stddeclinjector"] = makeLegacyFactory(
       "stddeclinjector", "legacy placeholder: stddeclinjector");

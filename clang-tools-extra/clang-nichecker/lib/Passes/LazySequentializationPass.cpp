@@ -3,8 +3,10 @@
 #include "clang-nichecker/Support/SourceUtils.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/Stmt.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Support/FormatVariadic.h"
 
 #include <optional>
@@ -82,6 +84,12 @@ const FunctionDecl *functionFromThreadStartArgument(const CallExpr *Call) {
   if (!Call || Call->getNumArgs() < 3)
     return nullptr;
   const Expr *ThreadStart = Call->getArg(2)->IgnoreParenImpCasts();
+  while (const auto *Cast = dyn_cast<ExplicitCastExpr>(ThreadStart))
+    ThreadStart = Cast->getSubExpr()->IgnoreParenImpCasts();
+  if (const auto *Address = dyn_cast<UnaryOperator>(ThreadStart)) {
+    if (Address->getOpcode() == UO_AddrOf)
+      ThreadStart = Address->getSubExpr()->IgnoreParenImpCasts();
+  }
   const auto *Reference = dyn_cast<DeclRefExpr>(ThreadStart);
   return Reference ? dyn_cast<FunctionDecl>(Reference->getDecl()) : nullptr;
 }
@@ -201,6 +209,29 @@ std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
   return OS.str();
 }
 
+class ThreadEntryCollector : public RecursiveASTVisitor<ThreadEntryCollector> {
+public:
+  explicit ThreadEntryCollector(ASTContext &AST)
+      : AST(AST), SM(AST.getSourceManager()) {}
+
+  bool VisitCallExpr(CallExpr *Call) {
+    const FunctionDecl *Callee = Call->getDirectCallee();
+    if (!Callee || Callee->getName() != "pthread_create" ||
+        !isMainFileLocation(Call->getBeginLoc(), SM))
+      return true;
+    if (const FunctionDecl *Entry = functionFromThreadStartArgument(Call))
+      Entries.push_back(Entry);
+    return true;
+  }
+
+  const std::vector<const FunctionDecl *> &entries() const { return Entries; }
+
+private:
+  ASTContext &AST;
+  SourceManager &SM;
+  std::vector<const FunctionDecl *> Entries;
+};
+
 class LazyPlanCollector {
 public:
   LazyPlanCollector(ASTContext &AST, const ProgramSummary &Summary)
@@ -227,11 +258,20 @@ public:
 
     std::vector<ThreadPlan> Plans;
     Plans.push_back(ThreadPlan{Main, Main->getNameAsString(), 0, 0, true});
-    for (const std::string &Name : Summary.ThreadEntryFunctions) {
-      auto It = Definitions.find(Name);
-      if (It == Definitions.end() || It->second == Main)
+    ThreadEntryCollector EntryCollector(AST);
+    EntryCollector.TraverseDecl(AST.getTranslationUnitDecl());
+    StringSet<> SeenEntries;
+    for (const FunctionDecl *Entry : EntryCollector.entries()) {
+      const FunctionDecl *Definition = Entry ? Entry->getDefinition() : nullptr;
+      if (!Definition || Definition == Main ||
+          !isMainFileLocation(Definition->getLocation(), SM))
         continue;
-      Plans.push_back(ThreadPlan{It->second, Name,
+      const std::string Name = Definition->getNameAsString();
+      // Duplicator makes every static create entry distinct. Keep the old
+      // de-duplication fallback when lazyseq is invoked without that pass.
+      if (!SeenEntries.insert(Name).second)
+        continue;
+      Plans.push_back(ThreadPlan{Definition, Name,
                                  static_cast<unsigned>(Plans.size()), 0, false});
     }
     if (Plans.size() == 1) {

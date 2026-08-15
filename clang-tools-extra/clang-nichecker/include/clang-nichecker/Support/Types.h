@@ -10,6 +10,7 @@
 #include "llvm/ADT/StringRef.h"
 
 #include <string>
+#include <map>
 #include <vector>
 
 namespace clang::nichecker {
@@ -41,12 +42,14 @@ struct PipelineOptions {
   unsigned UnwindFor = 1;
   unsigned Contexts = 0;
   unsigned Cores = 1;
+  unsigned Threads = 0;
   std::string Backend = "cbmc";
   std::string SliceVariable;
   std::string SliceMode;
   bool ReuseDimacs = false;
   bool EnableLegacySliceJar = false;
   bool EnableLegacyLabelJar = false;
+  bool EnableLoopAbstraction = false;
   bool PrintAnalysis = false;
   bool EnableCBMC = false;
 };
@@ -66,6 +69,8 @@ struct TransformResult {
   std::string BackendOutput;
   std::string BackendLogPath;
   std::string BackendOutcome;
+  std::map<unsigned, std::string> SourceLineFunctions;
+  unsigned EntryLine = 0;
   bool RequiresASTReparse = true;
 };
 

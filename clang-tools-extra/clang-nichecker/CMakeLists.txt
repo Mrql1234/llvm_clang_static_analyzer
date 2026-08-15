@@ -10,18 +10,26 @@ add_clang_executable(clang-nichecker
   lib/Driver/Frontend.cpp
   lib/Driver/PipelineBuilder.cpp
   lib/Passes/ConditionExtractionPass.cpp
+  lib/Passes/ConstantsPass.cpp
+  lib/Passes/CondWaitConverterPass.cpp
   lib/Passes/CounterexamplePass.cpp
   lib/Passes/DoWhileConverterPass.cpp
+  lib/Passes/DuplicatorPass.cpp
   lib/Passes/FeederPass.cpp
   lib/Passes/FeederSeqProgramPass.cpp
+  lib/Passes/FunctionTrackerPass.cpp
   lib/Passes/InstrumenterPass.cpp
+  lib/Passes/InlinerPass.cpp
   lib/Passes/InterruptLoweringPass.cpp
   lib/Passes/LegacyModulePass.cpp
   lib/Passes/LazySequentializationPass.cpp
   lib/Passes/LabelInsertionPass.cpp
   lib/Passes/LoopUnrollPass.cpp
+  lib/Passes/LoopAbstractionPass.cpp
   lib/Passes/MapperPass.cpp
   lib/Passes/ProgramClassifierPass.cpp
+  lib/Passes/PreinstrumenterPass.cpp
+  lib/Passes/PreInlinerPass.cpp
   lib/Passes/ReplaceGotoPass.cpp
   lib/Passes/SequentializationPass.cpp
   lib/Passes/SelfOperationPass.cpp
@@ -29,7 +37,9 @@ add_clang_executable(clang-nichecker
   lib/Passes/SliceSeqProgramPass.cpp
   lib/Passes/SourceEmissionPass.cpp
   lib/Passes/SpinlockPass.cpp
+  lib/Passes/SwitchTransformerPass.cpp
   lib/Passes/VariableRenamingPass.cpp
+  lib/Passes/WorkaroundsPass.cpp
   lib/Support/LegacyJarRunner.cpp
   lib/Support/SourceUtils.cpp
   )

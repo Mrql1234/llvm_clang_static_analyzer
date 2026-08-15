@@ -171,7 +171,7 @@
 1. `lazyseq` 已是原生 C++ pass，不再调用 Python bridge 生成源码。
 2. `Frontend` 会在 `lazyseq` 完成源码改写后重解析；因此 `lazyseq` 后面的 AST pass 看到的是当前源码，而不是初始 AST。
 3. `__CPROVER_bitvector[...]` 是后续 `instrumenter` 的后端语法；在该 pass 之前，native lazyseq 只生成标准 C 的 `unsigned` 控制变量，保持可重解析。
-4. `instrumenter` 及其之后的模块将不再要求 AST 重解析；当前 `instrumenter` 尚未迁移完成，因此 `feeder` 会明确跳过 CBMC，避免验证不完整的中间产物。
+4. `instrumenter` 及其之后的模块将不再要求 AST 重解析；`feeder` 会将该后端文本交给 CBMC。事件/定时器、单变量访问序和完整 runtime 语义仍在继续收敛。
 5. 当前已覆盖默认轮次调度、直接 `pthread_create` / `pthread_join` 和线程入口的程序计数器切片；显式 schedule、context-bounded scheduler、ISR 优先级与时间约束仍待继续迁移。
 
 ### 与 Python `lazyseq` 的对比结论
@@ -247,6 +247,37 @@ ninja -C build-clang -j1 clang-nichecker
 
 1. 当前实际验证通过的是 `build-clang` 目录。
 2. 当前 WSL 内存较紧时，并行编译容易把多个 `cc1plus` 顶掉，所以这里优先记录 `-j1` 的稳定命令。
+
+## LoopAbstraction 原生迁移
+
+入口文件：
+
+1. `clang-tools-extra/clang-nichecker/include/clang-nichecker/Passes/LoopAbstractionPass.h`
+2. `clang-tools-extra/clang-nichecker/lib/Passes/LoopAbstractionPass.cpp`
+3. `clang-tools-extra/clang-nichecker/ClangNIChecker.cpp` 中的 `--loop-abs`
+
+Python 的开关来自 `nichecker/Cseq/modules/absOption`；默认关闭。C++ 默认同样关闭，开启后对非 `while(1)` 的标量归纳变量构造摘要：保存循环前值、以 `nondet_int()` 选择迭代次数/重置值、插入 `__CPROVER_assume`，并对循环内 `assert` 使用一次具体执行、一次假设执行、一次具体执行的归纳检查结构。数组、结构体、指针及嵌套循环暂不在该 pass 中摘要化，保留原循环，以避免用错误的摘要替换真实程序。
+
+单模块验证命令：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker \
+  --pipeline=LoopAbstraction --loop-abs -print-analysis \
+  -output=/tmp/lazy-loop-abs-native.c \
+  clang-tools-extra/clang-nichecker/test/lazy-loop-abstraction-input.c --
+build-clang/bin/clang -fsyntax-only /tmp/lazy-loop-abs-native.c
+```
+
+与 Python 链路对比时，先在 `nichecker/Cseq/modules/absOption` 中开启 `loopAbs`，再运行：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer/nichecker/Cseq
+python3 cseq.py -l lazy --input /tmp/loop-input.c --unwind 1 --rounds 1 -D
+```
+
+Python 的中间输出位于 `nichecker/Cseq/log/*_output__LoopAbstraction.c`；将其与 `/tmp/lazy-loop-abs-native.c` 对比保存变量、nondet 约束、循环体和末尾否定条件约束。对比关注语义结构，不以变量编号或排版差异作为不一致依据。
 
 ## 回归命令
 
@@ -498,3 +529,161 @@ build-clang/bin/clang -fsyntax-only /tmp/lazy-normalization-native.c
 ```
 
 预期分析输出包含“`spinlock 将 1 个空自旋循环改写为 assume`”、“`dowhileconverter 改写 do-while=1, for=1`”和“`selfop 展开了 5 个自操作`”。最后一项包含 `do-while` 展开后的两份循环体，因此计数为 5。
+
+## 2026-08：lazy 等待与错误位置预处理
+
+### 入口文件
+
+1. `clang-tools-extra/clang-nichecker/lib/Passes/CondWaitConverterPass.cpp`：迁移 Python `condwaitconverter`，为条件变量和屏障等待增加 lazyseq 可插入调度点。
+2. `clang-tools-extra/clang-nichecker/lib/Passes/PreinstrumenterPass.cpp`：迁移 Python `preinstrumenter` 的 `ERROR` 位置降级和顶层函数指针调用展开。
+3. `clang-tools-extra/clang-nichecker/test/lazy-preinstrumentation-input.c`：上述两个 pass 的最小回归输入。
+
+### 当前行为
+
+1. `condwaitconverter` 将 `pthread_cond_wait`、`pthread_cond_timedwait` 分成 `pthread_cond_wait_1` 与 `pthread_cond_wait_2`；将 `pthread_barrier_wait` 分成对应的 `_1`、`_2` 调用。若等待调用嵌在表达式中，第一段会插入包含该表达式的语句之前。
+2. `preinstrumenter` 将 `goto ERROR;` 和 `ERROR:` 所在语句降为 `__VERIFIER_error();`，并将顶层语句或赋值右侧的函数指针调用展开为按函数指针值选择的直接调用分支。
+
+### 回归命令
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+
+build-clang/bin/clang-nichecker \
+  --pipeline=preinstrumenter,condwaitconverter \
+  -print-analysis \
+  -output=/tmp/lazy-preinstrumentation-native.c \
+  clang-tools-extra/clang-nichecker/test/lazy-preinstrumentation-input.c --
+
+build-clang/bin/clang -fsyntax-only /tmp/lazy-preinstrumentation-native.c
+```
+
+预期输出包含 `__VERIFIER_error()`、`if (operation == increment)`、`pthread_cond_wait_1`、`pthread_cond_wait_2`、`pthread_barrier_wait_1` 与 `pthread_barrier_wait_2`。
+
+## 2026-08：lazy 线程入口复制
+
+### 入口文件
+
+1. `clang-tools-extra/clang-nichecker/lib/Passes/DuplicatorPass.cpp`：迁移 Python `duplicator`，将每个静态 `pthread_create` 入口对应到一个独立函数副本。
+2. `clang-tools-extra/clang-nichecker/test/lazy-duplicator-input.c`：验证同一函数被两次创建并同时被普通调用时的复制行为。
+
+### 当前行为与命令
+
+`duplicator` 会将同一入口函数依创建顺序复制为 `worker_0`、`worker_1` 等，并改写每个 `pthread_create` 的第三参数。若原函数仍存在普通调用，则保留原定义；函数原型也会同步复制。`--threads=N` 对应 Python 模块的 `--threads` 上界，`0` 表示不限制。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,duplicator \
+  -print-analysis \
+  -output=/tmp/lazy-duplicator-native.c \
+  clang-tools-extra/clang-nichecker/test/lazy-duplicator-input.c --
+
+build-clang/bin/clang -fsyntax-only /tmp/lazy-duplicator-native.c
+```
+
+预期产物包含 `worker_0`、`worker_1`、两个改写后的 `pthread_create` 调用，以及因普通调用而保留的 `worker` 原定义。
+
+`lazyseq` 会在 duplicator 重解析后直接扫描当前 AST 中的 `pthread_create` 参数来建立线程计划，而不再使用重写前的函数名摘要。可用下列命令验证两个复制入口都会被调度：
+
+```bash
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,duplicator,lazyseq --rounds=1 \
+  -print-analysis \
+  -output=/tmp/lazy-duplicator-lazyseq-native.c \
+  clang-tools-extra/clang-nichecker/test/lazy-duplicator-input.c --
+
+build-clang/bin/clang -fsyntax-only /tmp/lazy-duplicator-lazyseq-native.c
+```
+
+预期分析含“`native lazyseq 重写了 3 个线程函数`”；最后的语法检查目前会给出顺序化线程函数受 PC 守卫影响的非 void 返回路径警告，但不会失败。
+
+## 2026-08：函数归属追踪
+
+入口文件为 `clang-tools-extra/clang-nichecker/lib/Passes/FunctionTrackerPass.cpp`。该 pass 迁移 Python `functiontracker` 的源码行到函数名映射，并在顶层函数调用中把 `p++`、`p--` 实参改为先传递旧值、再执行自操作，避免后续源码变换丢失调用参数的求值顺序。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+
+build-clang/bin/clang-nichecker \
+  --pipeline=functiontracker -print-analysis \
+  -output=/tmp/lazy-functiontracker-native.c \
+  clang-tools-extra/clang-nichecker/test/lazy-functiontracker-input.c --
+
+build-clang/bin/clang -fsyntax-only /tmp/lazy-functiontracker-native.c
+```
+
+预期产物包含 `consume(first, second); first++; second--;`，分析信息会报告映射的源码行数和拆分数量。
+
+## 2026-08：switch 控制流转换
+
+入口文件为 `clang-tools-extra/clang-nichecker/lib/Passes/SwitchTransformerPass.cpp`，回归输入为 `clang-tools-extra/clang-nichecker/test/lazy-switchtransformer-input.c`。该 pass 缓存 switch 条件，生成 case/default 条件分支、case 标签和落空跳转；仅 case/default 直接包含的 `break` 会跳到 switch 出口，循环内部的 `break` 保持原样。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker \
+  --pipeline=switchtransformer -print-analysis \
+  -output=/tmp/lazy-switchtransformer-native.c \
+  clang-tools-extra/clang-nichecker/test/lazy-switchtransformer-input.c --
+build-clang/bin/clang -fsyntax-only /tmp/lazy-switchtransformer-native.c
+```
+
+嵌套 switch 当前保留在外层生成代码中，递归转换将在后续迭代补齐。
+
+## 2026-08：嵌套调用预处理
+
+入口文件为 `clang-tools-extra/clang-nichecker/lib/Passes/PreInlinerPass.cpp`，回归输入为 `clang-tools-extra/clang-nichecker/test/lazy-preinliner-input.c`。该 pass 迁移 Python `preinliner` 的核心语义：将有定义且非 `void` 的嵌套调用提升为同一 compound 语句前的临时变量赋值。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker --pipeline=preinliner \
+  -output=/tmp/lazy-preinliner-native.c \
+  clang-tools-extra/clang-nichecker/test/lazy-preinliner-input.c --
+build-clang/bin/clang -fsyntax-only /tmp/lazy-preinliner-native.c
+```
+
+预期产物为 `int __cs_preinliner_0 = twice(2); return add(__cs_preinliner_0, 1);`。
+
+## 2026-08：函数实例内联
+
+入口文件为 `clang-tools-extra/clang-nichecker/lib/Passes/InlinerPass.cpp`，回归输入为 `clang-tools-extra/clang-nichecker/test/lazy-inliner-input.c`。该 pass 消费 preinliner 的扁平调用，在调用点建立参数副本、`__cs_retval_<函数>_<序号>`、`__exit_<函数>_<序号>`，并将被内联函数的 return 变为赋值后跳至实例出口。当前保留原函数定义，保证函数指针和递归引用不被误删。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker --pipeline=preinliner,inliner \
+  -output=/tmp/lazy-inliner-native.c \
+  clang-tools-extra/clang-nichecker/test/lazy-inliner-input.c --
+build-clang/bin/clang -fsyntax-only /tmp/lazy-inliner-native.c
+```
+
+## 2026-08：前置兼容处理
+
+入口文件为 `clang-tools-extra/clang-nichecker/lib/Passes/WorkaroundsPass.cpp`，回归输入为 `clang-tools-extra/clang-nichecker/test/lazy-workarounds-input.c`。当前已迁移 Python `workarounds` 的恒假 `if (0)`/`if (!1)` 删除、`pthread_create` 启动函数 cast 去除、`pointer->field` 到 `(*pointer).field` 的降级、`auto/inline/extern/volatile/register` 声明前缀移除，以及当前 compound 中无对应 begin 的 `__VERIFIER_atomic_end()` 到 `__CSEQ_noop()` 的降级。线程局部变量数组化、匿名结构命名、复合声明拆分与所有初始化器兼容规则仍将继续补齐。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker --pipeline=workarounds \
+  -output=/tmp/lazy-workarounds-native.c \
+  clang-tools-extra/clang-nichecker/test/lazy-workarounds-input.c --
+build-clang/bin/clang -fsyntax-only /tmp/lazy-workarounds-native.c
+```
+
+## 2026-08：整数常量折叠
+
+入口文件为 `clang-tools-extra/clang-nichecker/lib/Passes/ConstantsPass.cpp`，回归输入为 `clang-tools-extra/clang-nichecker/test/lazy-constants-input.c`。该 pass 迁移 Python `constants` 的默认整数二元表达式折叠：递归处理 `+`、`-`、`*` 和可整除的 `/`，不可整除除法保持原表达式。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker --pipeline=constants \
+  -output=/tmp/lazy-constants-native.c \
+  clang-tools-extra/clang-nichecker/test/lazy-constants-input.c --
+build-clang/bin/clang -fsyntax-only /tmp/lazy-constants-native.c
+```
+
+预期产物包含 `int first = 10;`、`int second = 4;` 和未折叠的 `int third = 7 / 2;`。
