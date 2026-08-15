@@ -406,6 +406,7 @@ clang -fsyntax-only /tmp/interrupt_reparse_refresh4.c
 1. `lazyseq` 之前和 `lazyseq` 本身的输出均为标准 C，因此每次源码变化后继续通过 Clang AST 重解析。
 2. `instrumenter` 会生成 `__CPROVER_bitvector[...]`。这是 CBMC 后端语法，不是 Clang C 语法；从该模块开始，驱动只传递当前源码，不再构建新 AST。
 3. `replacegoto`、`mapper`、`feeder`、`cex` 均在后端文本阶段工作，不能重新引入 AST 依赖。
+4. 默认 round-robin 调度会在全部 worker 轮次之后追加一个 `main_thread` 最终上下文，匹配 Python `lazyseq.__mt_scheduler()` 对 `--rounds=1` 生成 `__cs_tmp_t0_r1` 的行为，使主线程能继续完成 `pthread_join` 等尾部语句。
 
 ### 构建与回归命令
 

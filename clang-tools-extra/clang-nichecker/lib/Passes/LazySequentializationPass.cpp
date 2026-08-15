@@ -261,6 +261,25 @@ std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
       OS << "    ;\n  }\n";
     }
   }
+  // Python lazyseq schedules main once more after the worker rounds. This is
+  // where joins and the tail of a partially executed main_thread can finish.
+  const ThreadPlan &MainPlan = Plans.front();
+  const std::string FinalMainTemp =
+      formatv("__cs_tmp_t0_r{0}", Rounds).str();
+  OS << "  /* lazyseq final main context */\n";
+  OS << "  {\n";
+  OS << "    unsigned " << FinalMainTemp << ";\n";
+  OS << "    if (__cs_active_thread[0]) {\n";
+  OS << "      __cs_thread_index = 0;\n";
+  OS << "      __cs_pc_cs[0] = " << FinalMainTemp << ";\n";
+  OS << "      __VERIFIER_assume(__cs_pc_cs[0] >= __cs_pc[0]);\n";
+  OS << "      __VERIFIER_assume(__cs_pc_cs[0] <= "
+     << MainPlan.StatementCount << ");\n";
+  OS << "      main_thread(" << buildDefaultArguments(MainPlan.Function)
+     << ");\n";
+  OS << "      __cs_pc[0] = __cs_pc_cs[0];\n";
+  OS << "    }\n";
+  OS << "  }\n";
   OS << "  return 0;\n}\n";
   return OS.str();
 }
