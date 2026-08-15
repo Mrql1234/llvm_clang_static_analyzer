@@ -435,6 +435,17 @@ build-clang/bin/clang-nichecker \
   -output=/tmp/native_lazy_schedule.c \
   clang-tools-extra/clang-nichecker/test/lazy-duplicator-input.c --
 
+# 迁移 Python lazyseq 的 --norobin 分支：首轮运行 main，后续由
+# nondet 运行位决定是否执行线程，__cs_last_thread 禁止相邻轮次重复线程。
+# 与 Python 一致，--schedule 仅可扩展轮数，不会约束该调度器的选线程集合。
+# instrumenter 会为该分支的临时 PC、运行位和最后线程编号补齐 bitvector 宽度。
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,duplicator,lazyseq --norobin --rounds=2 \
+  -output=/tmp/native_lazy_norobin.c \
+  clang-tools-extra/clang-nichecker/test/lazy-duplicator-input.c --
+build-clang/bin/clang -fsyntax-only \
+  -Wno-implicit-function-declaration -Wno-return-type /tmp/native_lazy_norobin.c
+
 # 验证 replacegoto 的 Python 等价核心规则。
 build-clang/bin/clang-nichecker \
   --pipeline=replacegoto -print-analysis \

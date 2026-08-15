@@ -135,6 +135,7 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans) {
   OS << "static unsigned __cs_pc[" << Plans.size() << "] = {0};\n";
   OS << "static unsigned __cs_pc_cs[" << Plans.size() << "] = {0};\n";
   OS << "static unsigned __cs_thread_index = 0;\n";
+  OS << "static unsigned __cs_last_thread = 0;\n";
   OS << "static void *__cs_threadargs[" << Plans.size() << "] = {0};\n";
   OS << "static const unsigned __cs_thread_lines[" << Plans.size() << "] = {";
   for (size_t Index = 0; Index < Plans.size(); ++Index) {
@@ -348,6 +349,105 @@ std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
   OS << "      __cs_pc[0] = __cs_pc_cs[0];\n";
   OS << "    }\n";
   OS << "  }\n";
+  OS << "  return 0;\n}\n";
+  return OS.str();
+}
+
+std::string buildNoRoundRobinScheduler(const std::vector<ThreadPlan> &Plans,
+                                       unsigned Rounds) {
+  std::string Scheduler;
+  raw_string_ostream OS(Scheduler);
+  const ThreadPlan &MainPlan = Plans.front();
+
+  auto emitCall = [&](const ThreadPlan &Plan) {
+    if (Plan.IsMainThread)
+      OS << "      main_thread(" << buildDefaultArguments(Plan.Function)
+         << ");\n";
+    else
+      OS << "      " << Plan.Name << "(__cs_threadargs[" << Plan.Index
+         << "]);\n";
+  };
+  auto emitWorker = [&](const ThreadPlan &Plan, unsigned Round,
+                        bool IsFirstRound) {
+    const std::string Temp =
+        formatv("__cs_tmp_t{0}_r{1}", Plan.Index, Round).str();
+    const std::string Run =
+        formatv("__cs_run_t{0}_r{1}", Plan.Index, Round).str();
+    OS << "  {\n";
+    if (!IsFirstRound)
+      OS << "    __VERIFIER_assume(__cs_last_thread != " << Plan.Index
+         << ");\n";
+    OS << "    unsigned " << Temp << ";\n";
+    OS << "    unsigned " << Run << " = (" << Temp
+       << " && (__cs_active_thread[" << Plan.Index << "] == 1));\n";
+    OS << "    if (" << Run << ") {\n";
+    OS << "      __cs_thread_index = " << Plan.Index << ";\n";
+    if (IsFirstRound)
+      OS << "      __cs_pc_cs[" << Plan.Index << "] = " << Temp << ";\n";
+    else
+      OS << "      __cs_pc_cs[" << Plan.Index << "] = __cs_pc["
+         << Plan.Index << "] + " << Temp << ";\n";
+    if (!IsFirstRound)
+      OS << "      __VERIFIER_assume(__cs_pc_cs[" << Plan.Index
+         << "] >= __cs_pc[" << Plan.Index << "]);\n";
+    OS << "      __VERIFIER_assume(__cs_pc_cs[" << Plan.Index << "] <= "
+       << Plan.StatementCount << ");\n";
+    emitCall(Plan);
+    OS << "      __cs_last_thread = " << Plan.Index << ";\n";
+    OS << "      __cs_pc[" << Plan.Index << "] = __cs_pc_cs["
+       << Plan.Index << "];\n";
+    OS << "    }\n  }\n";
+  };
+
+  OS << "\nint main(void)\n{\n";
+  for (unsigned Round = 0; Round < Rounds; ++Round) {
+    OS << "  /* lazyseq no-round-robin round " << Round << " */\n";
+    const std::string MainTemp = formatv("__cs_tmp_t0_r{0}", Round).str();
+    const std::string MainRun = formatv("__cs_run_t0_r{0}", Round).str();
+    OS << "  {\n";
+    if (Round == 0) {
+      OS << "    unsigned " << MainTemp << ";\n";
+      OS << "    __VERIFIER_assume(" << MainTemp << " > 0);\n";
+      OS << "    __cs_thread_index = 0;\n";
+      OS << "    __cs_pc_cs[0] = " << MainTemp << ";\n";
+      OS << "    __VERIFIER_assume(__cs_pc_cs[0] <= "
+         << MainPlan.StatementCount << ");\n";
+      emitCall(MainPlan);
+      OS << "    __cs_last_thread = 0;\n";
+      OS << "    __cs_pc[0] = __cs_pc_cs[0];\n";
+    } else {
+      OS << "    __VERIFIER_assume(__cs_last_thread != 0);\n";
+      OS << "    unsigned " << MainTemp << ";\n";
+      OS << "    unsigned " << MainRun << " = (" << MainTemp
+         << " && (__cs_active_thread[0] == 1));\n";
+      OS << "    if (" << MainRun << ") {\n";
+      OS << "      __cs_thread_index = 0;\n";
+      OS << "      __cs_pc_cs[0] = __cs_pc[0] + " << MainTemp << ";\n";
+      OS << "      __VERIFIER_assume(__cs_pc_cs[0] >= __cs_pc[0]);\n";
+      OS << "      __VERIFIER_assume(__cs_pc_cs[0] <= "
+         << MainPlan.StatementCount << ");\n";
+      emitCall(MainPlan);
+      OS << "      __cs_last_thread = 0;\n";
+      OS << "      __cs_pc[0] = __cs_pc_cs[0];\n";
+      OS << "    }\n";
+    }
+    OS << "  }\n";
+    for (const ThreadPlan &Plan : Plans)
+      if (!Plan.IsMainThread)
+        emitWorker(Plan, Round, Round == 0);
+  }
+
+  const std::string FinalTemp = formatv("__cs_tmp_t0_r{0}", Rounds).str();
+  OS << "  /* lazyseq no-round-robin final main context */\n";
+  OS << "  {\n    unsigned " << FinalTemp << ";\n";
+  OS << "    if (__cs_active_thread[0] == 1) {\n";
+  OS << "      __cs_thread_index = 0;\n";
+  OS << "      __cs_pc_cs[0] = __cs_pc[0] + " << FinalTemp << ";\n";
+  OS << "      __VERIFIER_assume(__cs_pc_cs[0] >= __cs_pc[0]);\n";
+  OS << "      __VERIFIER_assume(__cs_pc_cs[0] <= "
+     << MainPlan.StatementCount << ");\n";
+  emitCall(MainPlan);
+  OS << "    }\n  }\n";
   OS << "  return 0;\n}\n";
   return OS.str();
 }
@@ -894,13 +994,18 @@ llvm::Error LazySequentializationPass::run(const PipelineContext &Context,
       static_cast<unsigned>(Plans.size()));
   if (!Selections)
     return Selections.takeError();
+  const unsigned EffectiveRounds = Selections->size();
   Result.Source = buildRuntimePrelude(Plans) + Source +
-                  buildScheduler(Plans, *Selections);
+                  (Context.Options.NoRoundRobin
+                       ? buildNoRoundRobinScheduler(Plans, EffectiveRounds)
+                       : buildScheduler(Plans, *Selections));
   Result.PendingReplacements.clear();
   Result.Notes.push_back(
       formatv("phase5: native lazyseq 重写了 {0} 个线程函数并生成 {1} 轮调度器",
-              Plans.size(), Selections->size())
+              Plans.size(), EffectiveRounds)
           .str());
+  if (Context.Options.NoRoundRobin)
+    Result.Notes.push_back("phase5: lazyseq 使用 Python norobin 等价调度器");
   if (Result.Summary.Kind == ProgramKind::InterruptDriven) {
     Result.Notes.push_back(
         "phase5: 当前 native lazyseq 仅调度 pthread_create 入口；ISR 优先级与约束尚未迁移");

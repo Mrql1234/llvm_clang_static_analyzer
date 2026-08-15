@@ -115,6 +115,26 @@ void lowerControlVariable(std::string &Source, StringRef Name, unsigned Width) {
   }
 }
 
+void lowerControlVariablesWithPrefix(std::string &Source, StringRef Prefix,
+                                     unsigned Width) {
+  const std::string Needle = "unsigned " + Prefix.str();
+  const std::string Type =
+      "unsigned __CPROVER_bitvector[" + std::to_string(Width) + "] ";
+  size_t Cursor = 0;
+  while ((Cursor = Source.find(Needle, Cursor)) != std::string::npos) {
+    size_t NameEnd = Cursor + Needle.size();
+    while (NameEnd < Source.size() &&
+           (std::isalnum(static_cast<unsigned char>(Source[NameEnd])) ||
+            Source[NameEnd] == '_'))
+      ++NameEnd;
+    const std::string Name =
+        Source.substr(Cursor + StringRef("unsigned ").size(),
+                      NameEnd - Cursor - StringRef("unsigned ").size());
+    Source.replace(Cursor, NameEnd - Cursor, Type + Name);
+    Cursor += Type.size() + Name.size();
+  }
+}
+
 } // namespace
 
 llvm::StringRef InstrumenterPass::name() const { return "instrumenter"; }
@@ -149,6 +169,13 @@ llvm::Error InstrumenterPass::run(const PipelineContext &Context,
   lowerControlVariable(Source, "__cs_pc_cs", PcWidth);
   lowerControlVariable(Source, "__cs_thread_lines", PcWidth);
   lowerControlVariable(Source, "__cs_thread_index", ThreadWidth);
+  lowerControlVariable(Source, "__cs_last_thread", ThreadWidth);
+  // Python's no-robin scheduler uses bounded PC increments. The current
+  // round-robin rewrite still has broader native label accounting, so keep
+  // its temporary choices unsigned until that metadata is migrated.
+  if (Context.Options.NoRoundRobin)
+    lowerControlVariablesWithPrefix(Source, "__cs_tmp_t", PcWidth);
+  lowerControlVariablesWithPrefix(Source, "__cs_run_t", 1);
   Source = "#define __CS_LAZY_INSTRUMENTED 1\n" + Source;
 
   Result.Source = std::move(Source);

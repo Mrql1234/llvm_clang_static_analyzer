@@ -69,6 +69,10 @@ static cl::opt<std::string>
                 cl::desc("lazy 轮次调度限制，例如 0,1:2 或 +:+"));
 
 static cl::opt<bool>
+    NoRoundRobinOpt("norobin", cl::cat(ClangNICheckerCategory),
+                    cl::desc("使用 Python lazyseq 的非轮转调度器"));
+
+static cl::opt<bool>
     EnableLoopAbstractionOpt("loop-abs", cl::cat(ClangNICheckerCategory),
                              cl::desc("启用 lazy.chain 的 LoopAbstraction 循环摘要"));
 
@@ -138,6 +142,7 @@ int main(int argc, const char **argv) {
   Options.Cores = CoresOpt;
   Options.Threads = ThreadsOpt;
   Options.Schedule = ScheduleOpt;
+  Options.NoRoundRobin = NoRoundRobinOpt;
   Options.EnableLoopAbstraction = EnableLoopAbstractionOpt;
   Options.Backend = BackendOpt;
   Options.EnableLegacySliceJar = EnableLegacySliceJarOpt;
