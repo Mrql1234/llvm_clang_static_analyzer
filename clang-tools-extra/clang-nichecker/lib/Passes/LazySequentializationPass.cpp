@@ -481,6 +481,54 @@ std::string rewriteThreadReturnValue(const Expr *Value,
   return *Text;
 }
 
+class ThreadExitCollector
+    : public RecursiveASTVisitor<ThreadExitCollector> {
+public:
+  ThreadExitCollector(const PipelineContext &Context, unsigned BaseOffset)
+      : Context(Context), BaseOffset(BaseOffset) {}
+
+  bool VisitReturnStmt(ReturnStmt *Return) {
+    std::optional<unsigned> Offset =
+        getFileOffset(Return->getBeginLoc(), Context.getSourceManager());
+    std::optional<std::string> Original = sourceText(Return, Context);
+    if (!Offset || !Original || *Offset < BaseOffset)
+      return true;
+
+    std::string Replacement = "__cs_pthread_exit(); return";
+    if (const Expr *Value = Return->getRetValue())
+      Replacement += " " + rewriteThreadReturnValue(Value, Context);
+    Replacement += ";";
+    Replacements.push_back(TextReplacement{
+        *Offset - BaseOffset, static_cast<unsigned>(Original->size()),
+        std::move(Replacement)});
+    return true;
+  }
+
+  std::vector<TextReplacement> takeReplacements() {
+    return std::move(Replacements);
+  }
+
+private:
+  const PipelineContext &Context;
+  unsigned BaseOffset;
+  std::vector<TextReplacement> Replacements;
+};
+
+std::string rewriteNestedThreadReturns(const Stmt *Statement,
+                                       StringRef Original,
+                                       const PipelineContext &Context) {
+  std::optional<unsigned> BaseOffset =
+      getFileOffset(Statement->getBeginLoc(), Context.getSourceManager());
+  if (!BaseOffset)
+    return Original.str();
+
+  ThreadExitCollector Collector(Context, *BaseOffset);
+  Collector.TraverseStmt(const_cast<Stmt *>(Statement));
+  std::string Rewritten = Original.str();
+  applyReplacements(Rewritten, Collector.takeReplacements());
+  return Rewritten;
+}
+
 std::string rewriteFunctionBody(
     const ThreadPlan &Plan, const StringMap<unsigned> &ThreadIndices,
     const PipelineContext &Context, unsigned &StatementCount) {
@@ -518,6 +566,8 @@ std::string rewriteFunctionBody(
           Rewritten += " return " + rewriteThreadReturnValue(Value, Context) + ";";
         else
           Rewritten += " return;";
+      } else {
+        Rewritten = rewriteNestedThreadReturns(Statement, Rewritten, Context);
       }
     }
     if (const auto *DeclStatement = dyn_cast<DeclStmt>(Statement)) {

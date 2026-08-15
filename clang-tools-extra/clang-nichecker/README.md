@@ -488,6 +488,26 @@ diff -u nichecker/Cseq/log/_21_output__replacegoto.c \
 
 对比时按语义检查线程入口、PC 宽度、标签/跳转、pthread 运行时和后端头文件，不要求变量命名、排版或运行时实现细节完全一致。若 Python 产物已经含 `__CPROVER_bitvector[...]`，不要把它再次交给 Clang 解析；应将其作为 instrumenter 之后的纯文本后端产物比较。
 
+### 嵌套线程退出回归
+
+`lazyseq` 现在会在 worker 函数的任意嵌套语句块内，把 `return` 改写为先调用
+`__cs_pthread_exit()` 再返回。这样线程特定数据的 destructor 不会因为 `if`、循环等
+控制流中的提前返回而遗漏。实现入口是
+`clang-tools-extra/clang-nichecker/lib/Passes/LazySequentializationPass.cpp`，回归输入为
+`clang-tools-extra/clang-nichecker/test/lazy-nested-return-input.c`。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,duplicator,lazyseq --rounds=1 \
+  -output=/tmp/lazy-nested-return.c \
+  clang-tools-extra/clang-nichecker/test/lazy-nested-return-input.c --
+build-clang/bin/clang -fsyntax-only \
+  -Wno-implicit-function-declaration -Wno-return-type /tmp/lazy-nested-return.c
+grep -n '__cs_pthread_exit(); return' /tmp/lazy-nested-return.c
+```
+
 ### JDK 11 配置
 
 legacy jar 只能使用 WSL 原生 JDK 11；Windows `java.exe` 在临时工作目录执行 `java -jar` 时会错误地报告主类不存在。当前用户级安装位置为 `/home/q/.local/java/openjdk11/usr/lib/jvm/java-11-openjdk-amd64`，入口脚本为 `nichecker/Cseq/java11-env.sh`。每个新 shell 在运行含 `slice` 或 `label-insertion` 的链路前都应执行：
