@@ -149,6 +149,9 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans) {
   OS << "static void *__cs_barrier_address[" << LockSlots << "] = {0};\n";
   OS << "static unsigned __cs_barrier_initial[" << LockSlots << "] = {0};\n";
   OS << "static unsigned __cs_barrier_current[" << LockSlots << "] = {0};\n\n";
+  OS << "static void *__cs_key_values[1][" << Plans.size() + 1 << "] = {{0}};\n";
+  OS << "static void (*__cs_key_destructor[1])(void *) = {0};\n";
+  OS << "static unsigned __cs_current_key = 0;\n\n";
   OS << "static void __cs_pthread_mutex_lock(void *Address);\n";
   OS << "static void __cs_pthread_mutex_unlock(void *Address);\n\n";
   OS << "#define __CS_LAZY_IF(T, A, B) \\\n";
@@ -207,6 +210,22 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans) {
   OS << "  unsigned Slot = __cs_barrier_slot(Address);\n";
   OS << "  __VERIFIER_assume(__cs_barrier_current[Slot] == 0);\n";
   OS << "  __cs_barrier_current[Slot] = __cs_barrier_initial[Slot];\n}\n\n";
+  OS << "static unsigned __cs_pthread_self(void)\n{\n";
+  OS << "  return __cs_thread_index + 1;\n}\n\n";
+  OS << "static void __cs_pthread_key_create(unsigned *Key, void (*Destructor)(void *))\n{\n";
+  OS << "  if (__cs_current_key < 1) {\n";
+  OS << "    *Key = __cs_current_key;\n";
+  OS << "    __cs_key_destructor[__cs_current_key++] = Destructor;\n";
+  OS << "  }\n}\n\n";
+  OS << "static void __cs_pthread_setspecific(unsigned Key, void *Value)\n{\n";
+  OS << "  if (Key < 1)\n    __cs_key_values[Key][__cs_pthread_self()] = Value;\n}\n\n";
+  OS << "static void *__cs_pthread_getspecific(unsigned Key)\n{\n";
+  OS << "  return Key < 1 ? __cs_key_values[Key][__cs_pthread_self()] : 0;\n}\n\n";
+  OS << "static void __cs_pthread_exit(void)\n{\n";
+  OS << "  unsigned Key;\n";
+  OS << "  for (Key = 0; Key < 1; ++Key)\n";
+  OS << "    if (__cs_key_destructor[Key] && __cs_key_values[Key][__cs_pthread_self()])\n";
+  OS << "      __cs_key_destructor[Key](__cs_key_values[Key][__cs_pthread_self()]);\n}\n\n";
   OS << "static void __cs_pthread_mutex_lock(void *Address)\n{\n";
   OS << "  unsigned Slot = __cs_lock_slot(Address);\n";
   OS << "  __VERIFIER_assume(__cs_lock_owner[Slot] == 0);\n";
@@ -395,6 +414,24 @@ std::string generatedLabelName(const ThreadPlan &Plan, unsigned StatementIndex) 
   return formatv("__cs_label_{0}_{1}", Plan.Name, StatementIndex).str();
 }
 
+std::string rewriteThreadReturnValue(const Expr *Value,
+                                     const PipelineContext &Context) {
+  std::optional<std::string> Text = sourceText(Value, Context);
+  if (!Text)
+    return "0";
+  const auto *Call = dyn_cast<CallExpr>(Value->IgnoreParenImpCasts());
+  if (!Call)
+    return *Text;
+  const std::string CalleeName = getCalleeName(Call, Context);
+  if (CalleeName == "pthread_self")
+    return "__cs_pthread_self()";
+  if (CalleeName == "pthread_getspecific" && Call->getNumArgs() >= 1) {
+    if (std::optional<std::string> Key = sourceText(Call->getArg(0), Context))
+      return "__cs_pthread_getspecific((unsigned)(" + *Key + "))";
+  }
+  return *Text;
+}
+
 std::string rewriteFunctionBody(
     const ThreadPlan &Plan, const StringMap<unsigned> &ThreadIndices,
     const PipelineContext &Context, unsigned &StatementCount) {
@@ -425,6 +462,15 @@ std::string rewriteFunctionBody(
       continue;
 
     std::string Rewritten = ensureStatementTerminator(*Text, Statement);
+    if (!Plan.IsMainThread) {
+      if (const auto *Return = dyn_cast<ReturnStmt>(Statement)) {
+        Rewritten = "__cs_pthread_exit();";
+        if (const Expr *Value = Return->getRetValue())
+          Rewritten += " return " + rewriteThreadReturnValue(Value, Context) + ";";
+        else
+          Rewritten += " return;";
+      }
+    }
     if (const auto *DeclStatement = dyn_cast<DeclStmt>(Statement)) {
       Rewritten.clear();
       for (const clang::Decl *DeclNode : DeclStatement->decls()) {
@@ -471,7 +517,7 @@ std::string rewriteFunctionBody(
             Rewritten = "__cs_pthread_mutex_destroy((void *)" + *Address + ");";
         }
       } else if (CalleeName == "pthread_exit") {
-        Rewritten = "return;";
+        Rewritten = "__cs_pthread_exit(); return;";
       } else if (CalleeName == "pthread_cond_init" ||
                  CalleeName == "pthread_cond_destroy" ||
                  CalleeName == "pthread_cond_signal" ||
@@ -501,6 +547,29 @@ std::string rewriteFunctionBody(
             Rewritten = "__cs_pthread_barrier_init((void *)" + *Address +
                         ", (unsigned)(" + *Count + "));";
         }
+      } else if (CalleeName == "pthread_key_create") {
+        if (Call->getNumArgs() >= 2) {
+          std::optional<std::string> Key = sourceText(Call->getArg(0), Context);
+          std::optional<std::string> Destructor = sourceText(Call->getArg(1), Context);
+          if (Key && Destructor)
+            Rewritten = "__cs_pthread_key_create((unsigned *)" + *Key + ", " +
+                        *Destructor + ");";
+        }
+      } else if (CalleeName == "pthread_setspecific") {
+        if (Call->getNumArgs() >= 2) {
+          std::optional<std::string> Key = sourceText(Call->getArg(0), Context);
+          std::optional<std::string> Value = sourceText(Call->getArg(1), Context);
+          if (Key && Value)
+            Rewritten = "__cs_pthread_setspecific((unsigned)(" + *Key +
+                        "), (void *)" + *Value + ");";
+        }
+      } else if (CalleeName == "pthread_getspecific") {
+        if (Call->getNumArgs() >= 1) {
+          if (std::optional<std::string> Key = sourceText(Call->getArg(0), Context))
+            Rewritten = "__cs_pthread_getspecific((unsigned)(" + *Key + "));";
+        }
+      } else if (CalleeName == "pthread_self") {
+        Rewritten = "__cs_pthread_self();";
       }
     }
 
@@ -514,6 +583,11 @@ std::string rewriteFunctionBody(
     Output += "\n" + generatedLabelName(Plan, StatementIndex + 1) + ":\n  ;\n";
     ++StatementIndex;
   }
+  Output += "  __cs_pthread_exit();\n";
+  if (Plan.Function->getReturnType()->isVoidType())
+    Output += "  return;\n";
+  else
+    Output += "  return 0;\n";
   Output += "}\n";
   StatementCount = StatementIndex;
   return Output;

@@ -503,6 +503,8 @@ java -version
 
 `clang-tools-extra/clang-nichecker/lib/Passes/LazySequentializationPass.cpp` 现在原生注入了 Python `lazyseqB.c` 的条件变量/屏障核心状态：条件变量由地址槽和信号状态表示，`pthread_cond_wait_1` 解锁 mutex，`pthread_cond_wait_2` 假设已被 signal/broadcast 后重新上锁；屏障记录地址、初始计数和当前计数，分别由 `_wait_1` 递减、`_wait_2` 等待归零并复位。`condwaitconverter` 的 `_1/_2` 调用会在 `lazyseq` 中显式改写为这些内部 runtime 函数。
 
+同一 runtime 还覆盖单 key 的线程特定数据模型：`pthread_key_create` 保存 destructor，`pthread_setspecific`/`pthread_getspecific` 按 `__cs_thread_index` 存取值，`pthread_self` 返回 CSeq 约定的线程编号；线程函数顶层 `return` 与显式 `pthread_exit` 均会先调用 `__cs_pthread_exit()` 执行 destructor。
+
 回归入口为 `clang-tools-extra/clang-nichecker/test/lazy-runtime-input.c`，运行命令如下：
 
 ```bash
