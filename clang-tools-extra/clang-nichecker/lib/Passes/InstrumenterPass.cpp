@@ -170,6 +170,8 @@ llvm::Error InstrumenterPass::run(const PipelineContext &Context,
   lowerControlVariable(Source, "__cs_thread_lines", PcWidth);
   lowerControlVariable(Source, "__cs_thread_index", ThreadWidth);
   lowerControlVariable(Source, "__cs_last_thread", ThreadWidth);
+  lowerControlVariable(Source, "__cs_tid", ThreadWidth);
+  lowerControlVariable(Source, "__cs_cs", PcWidth);
   // Python's no-robin scheduler uses bounded PC increments. The current
   // round-robin rewrite still has broader native label accounting, so keep
   // its temporary choices unsigned until that metadata is migrated.

@@ -446,6 +446,14 @@ build-clang/bin/clang-nichecker \
 build-clang/bin/clang -fsyntax-only \
   -Wno-implicit-function-declaration -Wno-return-type /tmp/native_lazy_norobin.c
 
+# 迁移 Python lazyseq 的 --contexts 分支。首个 context 固定执行 main，
+# 后续 context 由 __cs_tid[] 选择线程，由 __cs_cs[] 选择该线程的目标 PC。
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,duplicator,lazyseq,instrumenter \
+  --contexts=3 -output=/tmp/native_lazy_contexts.c \
+  clang-tools-extra/clang-nichecker/test/lazy-duplicator-input.c --
+grep -nE '__cs_(tid|cs)\\[' /tmp/native_lazy_contexts.c
+
 # 验证 replacegoto 的 Python 等价核心规则。
 build-clang/bin/clang-nichecker \
   --pipeline=replacegoto -print-analysis \

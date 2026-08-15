@@ -452,6 +452,65 @@ std::string buildNoRoundRobinScheduler(const std::vector<ThreadPlan> &Plans,
   return OS.str();
 }
 
+std::string buildContextBoundedScheduler(const std::vector<ThreadPlan> &Plans,
+                                         unsigned Contexts) {
+  std::string Scheduler;
+  raw_string_ostream OS(Scheduler);
+  const ThreadPlan &MainPlan = Plans.front();
+
+  auto emitCall = [&](const ThreadPlan &Plan, StringRef Indent) {
+    if (Plan.IsMainThread)
+      OS << Indent << "main_thread(" << buildDefaultArguments(Plan.Function)
+         << ");\n";
+    else
+      OS << Indent << Plan.Name << "(__cs_threadargs[" << Plan.Index
+         << "]);\n";
+  };
+  auto emitContextCall = [&](const ThreadPlan &Plan, unsigned Context,
+                             StringRef Indent) {
+    OS << Indent << "__cs_thread_index = " << Plan.Index << ";\n";
+    OS << Indent << "__VERIFIER_assume(__cs_active_thread[" << Plan.Index
+       << "]);\n";
+    OS << Indent << "__VERIFIER_assume(__cs_cs[" << Context
+       << "] >= __cs_pc_cs[" << Plan.Index << "]);\n";
+    OS << Indent << "__VERIFIER_assume(__cs_cs[" << Context << "] <= "
+       << Plan.StatementCount << ");\n";
+    OS << Indent << "__cs_pc_cs[" << Plan.Index << "] = __cs_cs["
+       << Context << "];\n";
+    emitCall(Plan, Indent);
+    OS << Indent << "__cs_pc[" << Plan.Index << "] = __cs_pc_cs["
+       << Plan.Index << "];\n";
+  };
+
+  OS << "\nint main(void)\n{\n";
+  OS << "  unsigned __cs_tid[" << Contexts << "];\n";
+  OS << "  unsigned __cs_cs[" << Contexts << "];\n";
+  OS << "  unsigned __cs_context;\n";
+  OS << "  __cs_tid[0] = 0;\n";
+  for (unsigned Context = 0; Context < Contexts; ++Context) {
+    OS << "  /* lazyseq context " << Context << " */\n";
+    OS << "  __cs_context = " << Context << ";\n";
+    if (Context == 0) {
+      OS << "  __cs_thread_index = 0;\n";
+      OS << "  __VERIFIER_assume(__cs_cs[0] >= __cs_pc_cs[0]);\n";
+      OS << "  __VERIFIER_assume(__cs_cs[0] <= " << MainPlan.StatementCount
+         << ");\n";
+      OS << "  __cs_pc_cs[0] = __cs_cs[0];\n";
+      emitCall(MainPlan, "  ");
+      OS << "  __cs_pc[0] = __cs_pc_cs[0];\n";
+      continue;
+    }
+    for (const ThreadPlan &Plan : Plans) {
+      OS << "  if (__cs_tid[" << Context << "] == " << Plan.Index
+         << ") {\n";
+      emitContextCall(Plan, Context, "    ");
+      OS << "  }\n";
+    }
+  }
+  OS << "  return 0;\n}\n";
+  return OS.str();
+}
+
 class ThreadEntryCollector : public RecursiveASTVisitor<ThreadEntryCollector> {
 public:
   explicit ThreadEntryCollector(ASTContext &AST)
@@ -998,7 +1057,10 @@ llvm::Error LazySequentializationPass::run(const PipelineContext &Context,
   Result.Source = buildRuntimePrelude(Plans) + Source +
                   (Context.Options.NoRoundRobin
                        ? buildNoRoundRobinScheduler(Plans, EffectiveRounds)
-                       : buildScheduler(Plans, *Selections));
+                       : Context.Options.Contexts
+                             ? buildContextBoundedScheduler(Plans,
+                                                            Context.Options.Contexts)
+                             : buildScheduler(Plans, *Selections));
   Result.PendingReplacements.clear();
   Result.Notes.push_back(
       formatv("phase5: native lazyseq 重写了 {0} 个线程函数并生成 {1} 轮调度器",
@@ -1006,6 +1068,11 @@ llvm::Error LazySequentializationPass::run(const PipelineContext &Context,
           .str());
   if (Context.Options.NoRoundRobin)
     Result.Notes.push_back("phase5: lazyseq 使用 Python norobin 等价调度器");
+  else if (Context.Options.Contexts)
+    Result.Notes.push_back(
+        formatv("phase5: lazyseq 使用 Python context-bounded 调度器（contexts={0}）",
+                Context.Options.Contexts)
+            .str());
   if (Result.Summary.Kind == ProgramKind::InterruptDriven) {
     Result.Notes.push_back(
         "phase5: 当前 native lazyseq 仅调度 pthread_create 入口；ISR 优先级与约束尚未迁移");
