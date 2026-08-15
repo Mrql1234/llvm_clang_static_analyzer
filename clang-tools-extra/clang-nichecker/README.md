@@ -454,6 +454,14 @@ build-clang/bin/clang-nichecker \
   clang-tools-extra/clang-nichecker/test/lazy-duplicator-input.c --
 grep -nE '__cs_(tid|cs)\\[' /tmp/native_lazy_contexts.c
 
+# 迁移 Python --nondet-condvar-wakeups：cond_wait_2 和 barrier_wait_2
+# 的信号/计数检查改为可选 assume，从而允许伪唤醒。
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,duplicator,condwaitconverter,lazyseq \
+  --nondet-condvar-wakeups -output=/tmp/native_lazy_spurious_wakeup.c \
+  clang-tools-extra/clang-nichecker/test/lazy-runtime-input.c --
+grep -n '__cs_wakeup' /tmp/native_lazy_spurious_wakeup.c
+
 # 验证 replacegoto 的 Python 等价核心规则。
 build-clang/bin/clang-nichecker \
   --pipeline=replacegoto -print-analysis \

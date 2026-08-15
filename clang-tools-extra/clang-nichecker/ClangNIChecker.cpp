@@ -73,6 +73,11 @@ static cl::opt<bool>
                     cl::desc("使用 Python lazyseq 的非轮转调度器"));
 
 static cl::opt<bool>
+    NondetCondvarWakeupsOpt(
+        "nondet-condvar-wakeups", cl::cat(ClangNICheckerCategory),
+        cl::desc("允许 lazy 条件变量和 barrier 发生伪唤醒"));
+
+static cl::opt<bool>
     EnableLoopAbstractionOpt("loop-abs", cl::cat(ClangNICheckerCategory),
                              cl::desc("启用 lazy.chain 的 LoopAbstraction 循环摘要"));
 
@@ -143,6 +148,7 @@ int main(int argc, const char **argv) {
   Options.Threads = ThreadsOpt;
   Options.Schedule = ScheduleOpt;
   Options.NoRoundRobin = NoRoundRobinOpt;
+  Options.NondetCondvarWakeups = NondetCondvarWakeupsOpt;
   Options.EnableLoopAbstraction = EnableLoopAbstractionOpt;
   Options.Backend = BackendOpt;
   Options.EnableLegacySliceJar = EnableLegacySliceJarOpt;

@@ -125,7 +125,8 @@ renameFunction(const FunctionDecl *FD, StringRef NewName,
   return TextReplacement{*Offset, *Length, NewName.str()};
 }
 
-std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans) {
+std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans,
+                                bool NondetCondvarWakeups) {
   std::string Lines;
   raw_string_ostream OS(Lines);
   const unsigned LockSlots = Plans.size() + 1;
@@ -191,7 +192,13 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans) {
   OS << "static void __cs_pthread_cond_wait_1(void *Condition, void *Mutex)\n{\n";
   OS << "  (void)Condition;\n  __cs_pthread_mutex_unlock(Mutex);\n}\n\n";
   OS << "static void __cs_pthread_cond_wait_2(void *Condition, void *Mutex)\n{\n";
-  OS << "  __VERIFIER_assume(__cs_cond_state[__cs_cond_slot(Condition)] == 1);\n";
+  if (NondetCondvarWakeups) {
+    OS << "  unsigned __cs_wakeup;\n";
+    OS << "  if (__cs_wakeup)\n";
+    OS << "    __VERIFIER_assume(__cs_cond_state[__cs_cond_slot(Condition)] == 1);\n";
+  } else {
+    OS << "  __VERIFIER_assume(__cs_cond_state[__cs_cond_slot(Condition)] == 1);\n";
+  }
   OS << "  __cs_pthread_mutex_lock(Mutex);\n}\n\n";
   OS << "static void __cs_pthread_cond_signal(void *Condition)\n{\n";
   OS << "  __cs_cond_state[__cs_cond_slot(Condition)] = 1;\n}\n\n";
@@ -210,7 +217,13 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans) {
   OS << "  --__cs_barrier_current[Slot];\n}\n\n";
   OS << "static void __cs_pthread_barrier_wait_2(void *Address)\n{\n";
   OS << "  unsigned Slot = __cs_barrier_slot(Address);\n";
-  OS << "  __VERIFIER_assume(__cs_barrier_current[Slot] == 0);\n";
+  if (NondetCondvarWakeups) {
+    OS << "  unsigned __cs_wakeup;\n";
+    OS << "  if (__cs_wakeup)\n";
+    OS << "    __VERIFIER_assume(__cs_barrier_current[Slot] == 0);\n";
+  } else {
+    OS << "  __VERIFIER_assume(__cs_barrier_current[Slot] == 0);\n";
+  }
   OS << "  __cs_barrier_current[Slot] = __cs_barrier_initial[Slot];\n}\n\n";
   OS << "static unsigned __cs_pthread_self(void)\n{\n";
   OS << "  return __cs_thread_index + 1;\n}\n\n";
@@ -1054,7 +1067,8 @@ llvm::Error LazySequentializationPass::run(const PipelineContext &Context,
   if (!Selections)
     return Selections.takeError();
   const unsigned EffectiveRounds = Selections->size();
-  Result.Source = buildRuntimePrelude(Plans) + Source +
+  Result.Source =
+      buildRuntimePrelude(Plans, Context.Options.NondetCondvarWakeups) + Source +
                   (Context.Options.NoRoundRobin
                        ? buildNoRoundRobinScheduler(Plans, EffectiveRounds)
                        : Context.Options.Contexts

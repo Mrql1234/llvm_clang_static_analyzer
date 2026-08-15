@@ -45,6 +45,7 @@ struct PipelineOptions {
   unsigned Threads = 0;
   std::string Schedule;
   bool NoRoundRobin = false;
+  bool NondetCondvarWakeups = false;
   std::string Backend = "cbmc";
   std::string SliceVariable;
   std::string SliceMode;
