@@ -43,6 +43,7 @@ struct PipelineOptions {
   unsigned Contexts = 0;
   unsigned Cores = 1;
   unsigned Threads = 0;
+  std::string Schedule;
   std::string Backend = "cbmc";
   std::string SliceVariable;
   std::string SliceMode;

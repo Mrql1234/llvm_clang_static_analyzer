@@ -427,6 +427,14 @@ build-clang/bin/clang-nichecker \
   -output=/tmp/native_lazy_after_mapper.c \
   nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
 
+# 迁移 Python lazyseq 的显式轮次约束。首轮始终额外调度 main，
+# schedule 长度超过 --rounds 时会自动扩展轮数。
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,duplicator,lazyseq --rounds=1 \
+  --schedule=0,1:2 \
+  -output=/tmp/native_lazy_schedule.c \
+  clang-tools-extra/clang-nichecker/test/lazy-duplicator-input.c --
+
 # 验证 replacegoto 的 Python 等价核心规则。
 build-clang/bin/clang-nichecker \
   --pipeline=replacegoto -print-analysis \

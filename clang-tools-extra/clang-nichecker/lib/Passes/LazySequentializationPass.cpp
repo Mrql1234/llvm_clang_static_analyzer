@@ -10,6 +10,7 @@
 #include "llvm/Support/FormatVariadic.h"
 
 #include <optional>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -241,15 +242,63 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans) {
   return OS.str();
 }
 
+Expected<std::vector<std::vector<bool>>>
+buildRoundSelections(StringRef Schedule, unsigned Rounds, unsigned ThreadCount) {
+  std::vector<std::string> RoundSpecs;
+  if (!Schedule.trim().empty()) {
+    SmallVector<StringRef, 8> Parts;
+    Schedule.split(Parts, ':', -1, false);
+    for (StringRef Part : Parts) {
+      Part = Part.trim();
+      if (!Part.empty())
+        RoundSpecs.push_back(Part.str());
+    }
+  }
+
+  const unsigned EffectiveRounds = std::max<unsigned>(Rounds, RoundSpecs.size());
+  std::vector<std::vector<bool>> Selections(
+      EffectiveRounds, std::vector<bool>(ThreadCount, RoundSpecs.empty()));
+  for (unsigned Round = 0; Round < EffectiveRounds; ++Round) {
+    if (Round >= RoundSpecs.size()) {
+      std::fill(Selections[Round].begin(), Selections[Round].end(), true);
+      continue;
+    }
+    SmallVector<StringRef, 8> Entries;
+    StringRef(RoundSpecs[Round]).split(Entries, ',', -1, false);
+    for (StringRef Entry : Entries) {
+      Entry = Entry.trim();
+      if (Entry.empty())
+        continue;
+      if (Entry == "+") {
+        std::fill(Selections[Round].begin(), Selections[Round].end(), true);
+        break;
+      }
+      unsigned Index = 0;
+      if (Entry.getAsInteger(10, Index) || Index >= ThreadCount)
+        return createStringError(inconvertibleErrorCode(),
+                                 "lazyseq --schedule 包含无效线程编号: " +
+                                     Entry.str());
+      Selections[Round][Index] = true;
+    }
+  }
+  // Python lazyseq always lets main enter the first context to create threads.
+  if (!Selections.empty())
+    Selections.front()[0] = true;
+  return Selections;
+}
+
 std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
-                           unsigned Rounds) {
+                           const std::vector<std::vector<bool>> &Selections) {
   std::string Scheduler;
   raw_string_ostream OS(Scheduler);
+  const unsigned Rounds = static_cast<unsigned>(Selections.size());
 
   OS << "\nint main(void)\n{\n";
   for (unsigned Round = 0; Round < Rounds; ++Round) {
     OS << "  /* lazyseq round " << Round << " */\n";
     for (const ThreadPlan &Plan : Plans) {
+      if (!Selections[Round][Plan.Index])
+        continue;
       const std::string Temp =
           formatv("__cs_tmp_t{0}_r{1}", Plan.Index, Round).str();
       OS << "  {\n";
@@ -646,12 +695,17 @@ llvm::Error LazySequentializationPass::run(const PipelineContext &Context,
 
   std::string Source = materializeSource(Context, Result);
   applyReplacements(Source, Replacements);
+  Expected<std::vector<std::vector<bool>>> Selections = buildRoundSelections(
+      Context.Options.Schedule, Context.Options.Rounds,
+      static_cast<unsigned>(Plans.size()));
+  if (!Selections)
+    return Selections.takeError();
   Result.Source = buildRuntimePrelude(Plans) + Source +
-                  buildScheduler(Plans, Context.Options.Rounds);
+                  buildScheduler(Plans, *Selections);
   Result.PendingReplacements.clear();
   Result.Notes.push_back(
       formatv("phase5: native lazyseq 重写了 {0} 个线程函数并生成 {1} 轮调度器",
-              Plans.size(), Context.Options.Rounds)
+              Plans.size(), Selections->size())
           .str());
   if (Result.Summary.Kind == ProgramKind::InterruptDriven) {
     Result.Notes.push_back(

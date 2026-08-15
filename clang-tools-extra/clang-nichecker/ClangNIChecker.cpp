@@ -64,6 +64,10 @@ static cl::opt<unsigned>
     ThreadsOpt("threads", cl::cat(ClangNICheckerCategory),
                cl::desc("pthread_create 静态创建上界，0 表示不限制"), cl::init(0));
 
+static cl::opt<std::string>
+    ScheduleOpt("schedule", cl::cat(ClangNICheckerCategory),
+                cl::desc("lazy 轮次调度限制，例如 0,1:2 或 +:+"));
+
 static cl::opt<bool>
     EnableLoopAbstractionOpt("loop-abs", cl::cat(ClangNICheckerCategory),
                              cl::desc("启用 lazy.chain 的 LoopAbstraction 循环摘要"));
@@ -133,6 +137,7 @@ int main(int argc, const char **argv) {
   Options.Contexts = ContextsOpt;
   Options.Cores = CoresOpt;
   Options.Threads = ThreadsOpt;
+  Options.Schedule = ScheduleOpt;
   Options.EnableLoopAbstraction = EnableLoopAbstractionOpt;
   Options.Backend = BackendOpt;
   Options.EnableLegacySliceJar = EnableLegacySliceJarOpt;
