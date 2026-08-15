@@ -669,7 +669,7 @@ build-clang/bin/clang -fsyntax-only /tmp/lazy-preinliner-native.c
 
 ## 2026-08：函数实例内联
 
-入口文件为 `clang-tools-extra/clang-nichecker/lib/Passes/InlinerPass.cpp`，回归输入为 `clang-tools-extra/clang-nichecker/test/lazy-inliner-input.c`。该 pass 消费 preinliner 的扁平调用，在调用点建立参数副本、`__cs_retval_<函数>_<序号>`、`__exit_<函数>_<序号>`，并将被内联函数的 return 变为赋值后跳至实例出口。当前保留原函数定义，保证函数指针和递归引用不被误删。
+入口文件为 `clang-tools-extra/clang-nichecker/lib/Passes/InlinerPass.cpp`，回归输入为 `clang-tools-extra/clang-nichecker/test/lazy-inliner-input.c`。该 pass 消费 preinliner 的扁平调用，在调用点建立参数副本、`__cs_retval_<函数>_<序号>`、`__exit_<函数>_<序号>`，并将被内联函数的 return 变为赋值后跳至实例出口。原函数内的标签与 goto 会统一加上实例后缀，避免同一函数多次内联后产生重复标签。当前保留原函数定义，保证函数指针和递归引用不被误删。
 
 ```bash
 cd /home/q/code/llvm_clang_static_analyzer

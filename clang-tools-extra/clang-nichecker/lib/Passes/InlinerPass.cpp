@@ -147,6 +147,15 @@ private:
         return true;
       }
       bool TraverseReturnStmt(ReturnStmt *Return) { VisitReturnStmt(Return); return true; }
+      bool VisitLabelStmt(LabelStmt *Label) {
+        addLabelReplacement(Label->getIdentLoc(), Label->getName());
+        return true;
+      }
+      bool VisitGotoStmt(GotoStmt *Goto) {
+        if (const LabelDecl *Target = Goto->getLabel())
+          addLabelReplacement(Goto->getLabelLoc(), Target->getName());
+        return true;
+      }
       bool VisitDeclRefExpr(DeclRefExpr *Reference) {
         const auto *Parameter = dyn_cast<ParmVarDecl>(Reference->getDecl());
         if (!Parameter)
@@ -163,6 +172,15 @@ private:
         return true;
       }
     private:
+      void addLabelReplacement(SourceLocation Location, StringRef Name) {
+        auto Offset = getFileOffset(Location, Context.getSourceManager());
+        auto Length = getTokenLength(Location, Context.getSourceManager(),
+                                    Context.getLangOpts());
+        if (!Offset || !Length || !*Length || *Offset < Begin)
+          return;
+        Changes.push_back({*Offset - Begin, *Length,
+                           Name.str() + "_" + Suffix.str()});
+      }
       ASTContext &Context; const FunctionDecl *Callee; unsigned Begin; StringRef Suffix; StringRef ReturnName;
       bool ReturnsValue; std::vector<TextReplacement> &Changes;
     } Visitor(Context, Callee, *Begin, Suffix, ReturnName, !Callee->getReturnType()->isVoidType(),
