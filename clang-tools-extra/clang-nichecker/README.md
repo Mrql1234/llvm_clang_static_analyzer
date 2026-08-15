@@ -466,3 +466,35 @@ java -version
 2. `instrumenter` 已覆盖 rawline 物化、CBMC 基础符号映射和 lazy 控制变量位宽；Python 中单变量访问序、事件/定时器和完整头文件拼接仍待迁移。
 3. `mapper` 已支持 `--backend=cbmc-ext --contexts>0 --cores=2^n`：生成 DIMACS，映射 `__cs_thread_index` 的命题位，并由 feeder 验证全部分片。当前分片按顺序执行，尚未迁移 Python feeder 的多进程并发调度；可用 `--reuse-dimacs` 复用同名 DIMACS 文件。
 4. `cex` 已接收并报告 CBMC 原始轨迹；旧 Python 的源码行映射与 SV-COMP witness 生成尚待迁移。
+
+## 2026-08：lazy 前序规范化 pass
+
+### 入口文件
+
+1. `clang-tools-extra/clang-nichecker/lib/Passes/SpinlockPass.cpp`：迁移 Python `spinlock` 的空自旋循环处理。
+2. `clang-tools-extra/clang-nichecker/lib/Passes/DoWhileConverterPass.cpp`：迁移 Python `dowhileconverter` 的 `do-while` 和 `for` 规范化。
+3. `clang-tools-extra/clang-nichecker/lib/Passes/SelfOperationPass.cpp`：迁移 Python `selfop` 的自操作表达式展开。
+4. `clang-tools-extra/clang-nichecker/test/lazy-normalization-input.c`：以上三个 pass 的最小回归输入。
+
+### 当前行为
+
+1. `spinlock` 将条件无副作用的空 `while` 循环替换为 `__VERIFIER_assume(!(条件))`，避免 lazy 顺序化保留无进展的自旋。
+2. `dowhileconverter` 将 `do { ... } while (条件)` 规范化为首轮执行一次的 `for` 与后续 `while`，并将 `for` 循环改写为等价 `while`。
+3. `selfop` 将独立语句中的 `++`、`--`、`+=`、`-=`、`*=`、`/=` 展开为普通赋值，减少后续文本阶段的表达式形式。
+
+### 构建与回归命令
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+
+build-clang/bin/clang-nichecker \
+  --pipeline=spinlock,dowhileconverter,selfop \
+  -print-analysis \
+  -output=/tmp/lazy-normalization-native.c \
+  clang-tools-extra/clang-nichecker/test/lazy-normalization-input.c --
+
+build-clang/bin/clang -fsyntax-only /tmp/lazy-normalization-native.c
+```
+
+预期分析输出包含“`spinlock 将 1 个空自旋循环改写为 assume`”、“`dowhileconverter 改写 do-while=1, for=1`”和“`selfop 展开了 5 个自操作`”。最后一项包含 `do-while` 展开后的两份循环体，因此计数为 5。

@@ -2,6 +2,7 @@
 #include "clang-nichecker/Backend/CBMCDriverPass.h"
 #include "clang-nichecker/Passes/ConditionExtractionPass.h"
 #include "clang-nichecker/Passes/CounterexamplePass.h"
+#include "clang-nichecker/Passes/DoWhileConverterPass.h"
 #include "clang-nichecker/Passes/FeederPass.h"
 #include "clang-nichecker/Passes/FeederSeqProgramPass.h"
 #include "clang-nichecker/Passes/InstrumenterPass.h"
@@ -14,9 +15,11 @@
 #include "clang-nichecker/Passes/ProgramClassifierPass.h"
 #include "clang-nichecker/Passes/ReplaceGotoPass.h"
 #include "clang-nichecker/Passes/SequentializationPass.h"
+#include "clang-nichecker/Passes/SelfOperationPass.h"
 #include "clang-nichecker/Passes/SlicePass.h"
 #include "clang-nichecker/Passes/SliceSeqProgramPass.h"
 #include "clang-nichecker/Passes/SourceEmissionPass.h"
+#include "clang-nichecker/Passes/SpinlockPass.h"
 #include "clang-nichecker/Passes/VariableRenamingPass.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
@@ -75,6 +78,11 @@ StringMap<PassFactory> buildRegistry() {
   Registry["instrumenter"] = [] {
     return std::make_unique<InstrumenterPass>();
   };
+  Registry["spinlock"] = [] { return std::make_unique<SpinlockPass>(); };
+  Registry["dowhileconverter"] = [] {
+    return std::make_unique<DoWhileConverterPass>();
+  };
+  Registry["selfop"] = [] { return std::make_unique<SelfOperationPass>(); };
   Registry["replacegoto"] = [] { return std::make_unique<ReplaceGotoPass>(); };
   Registry["mapper"] = [] { return std::make_unique<MapperPass>(); };
   Registry["cex"] = [] { return std::make_unique<CounterexamplePass>(); };
@@ -91,19 +99,14 @@ StringMap<PassFactory> buildRegistry() {
       makeLegacyFactory("functiontracker", "legacy placeholder: functiontracker");
   Registry["preinstrumenter"] =
       makeLegacyFactory("preinstrumenter", "legacy placeholder: preinstrumenter");
-  Registry["spinlock"] =
-      makeLegacyFactory("spinlock", "legacy placeholder: spinlock");
   Registry["preinliner"] =
       makeLegacyFactory("preinliner", "legacy placeholder: preinliner");
   Registry["inliner"] =
       makeLegacyFactory("inliner", "legacy placeholder: inliner");
   Registry["switchtransformer"] = makeLegacyFactory(
       "switchtransformer", "legacy placeholder: switchtransformer");
-  Registry["dowhileconverter"] = makeLegacyFactory(
-      "dowhileconverter", "legacy placeholder: dowhileconverter");
   Registry["LoopAbstraction"] = makeLegacyFactory(
       "LoopAbstraction", "legacy placeholder: LoopAbstraction");
-  Registry["selfop"] = makeLegacyFactory("selfop", "legacy placeholder: selfop");
   Registry["constants"] =
       makeLegacyFactory("constants", "legacy placeholder: constants");
   Registry["duplicator"] =

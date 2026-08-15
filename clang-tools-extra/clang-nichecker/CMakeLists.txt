@@ -11,6 +11,7 @@ add_clang_executable(clang-nichecker
   lib/Driver/PipelineBuilder.cpp
   lib/Passes/ConditionExtractionPass.cpp
   lib/Passes/CounterexamplePass.cpp
+  lib/Passes/DoWhileConverterPass.cpp
   lib/Passes/FeederPass.cpp
   lib/Passes/FeederSeqProgramPass.cpp
   lib/Passes/InstrumenterPass.cpp
@@ -23,9 +24,11 @@ add_clang_executable(clang-nichecker
   lib/Passes/ProgramClassifierPass.cpp
   lib/Passes/ReplaceGotoPass.cpp
   lib/Passes/SequentializationPass.cpp
+  lib/Passes/SelfOperationPass.cpp
   lib/Passes/SlicePass.cpp
   lib/Passes/SliceSeqProgramPass.cpp
   lib/Passes/SourceEmissionPass.cpp
+  lib/Passes/SpinlockPass.cpp
   lib/Passes/VariableRenamingPass.cpp
   lib/Support/LegacyJarRunner.cpp
   lib/Support/SourceUtils.cpp
