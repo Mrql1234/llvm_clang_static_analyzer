@@ -1,14 +1,18 @@
-typedef unsigned long pthread_t;
+#include <pthread.h>
 
 int released;
+pthread_mutex_t lock;
 
 void cleanup(void *value) {
   released = *(int *)value;
 }
 
 void *worker(void *arg) {
-  if (*(int *)arg)
+  if (*(int *)arg) {
+    pthread_mutex_lock(&lock);
+    pthread_mutex_unlock(&lock);
     return arg;
+  }
   return 0;
 }
 

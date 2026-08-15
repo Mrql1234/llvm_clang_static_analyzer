@@ -459,6 +459,99 @@ std::string rewriteJoinCall(const CallExpr *Call, const PipelineContext &Context
       .str();
 }
 
+std::optional<std::string>
+rewriteNestedRuntimeCall(const CallExpr *Call,
+                         const StringMap<unsigned> &ThreadIndices,
+                         const PipelineContext &Context) {
+  const std::string CalleeName = getCalleeName(Call, Context);
+  if (CalleeName == "pthread_create") {
+    const FunctionDecl *Entry = functionFromThreadStartArgument(Call);
+    auto It = Entry ? ThreadIndices.find(Entry->getName())
+                    : ThreadIndices.end();
+    if (It == ThreadIndices.end())
+      return std::nullopt;
+    std::string Replacement = rewriteCreateCall(Call, It->second, Context);
+    if (StringRef(Replacement).ends_with(";"))
+      Replacement.pop_back();
+    return Replacement;
+  }
+  if (CalleeName == "pthread_join")
+    return rewriteJoinCall(Call, Context);
+
+  auto addressArgument = [&](StringRef RuntimeName) -> std::optional<std::string> {
+    if (Call->getNumArgs() < 1)
+      return std::nullopt;
+    std::optional<std::string> Address = sourceText(Call->getArg(0), Context);
+    return Address ? std::optional<std::string>(RuntimeName.str() + "((void *)" +
+                                                *Address + ")")
+                   : std::nullopt;
+  };
+  if (CalleeName == "pthread_mutex_init")
+    return addressArgument("__cs_pthread_mutex_init");
+  if (CalleeName == "pthread_mutex_lock")
+    return addressArgument("__cs_pthread_mutex_lock");
+  if (CalleeName == "pthread_mutex_unlock")
+    return addressArgument("__cs_pthread_mutex_unlock");
+  if (CalleeName == "pthread_mutex_destroy")
+    return addressArgument("__cs_pthread_mutex_destroy");
+  if (CalleeName == "pthread_cond_init")
+    return addressArgument("__cs_pthread_cond_init");
+  if (CalleeName == "pthread_cond_destroy")
+    return addressArgument("__cs_pthread_cond_destroy");
+  if (CalleeName == "pthread_cond_signal")
+    return addressArgument("__cs_pthread_cond_signal");
+  if (CalleeName == "pthread_cond_broadcast")
+    return addressArgument("__cs_pthread_cond_broadcast");
+  if (CalleeName == "pthread_barrier_destroy")
+    return addressArgument("__cs_pthread_barrier_destroy");
+  if (CalleeName == "pthread_barrier_wait_1")
+    return addressArgument("__cs_pthread_barrier_wait_1");
+  if (CalleeName == "pthread_barrier_wait_2")
+    return addressArgument("__cs_pthread_barrier_wait_2");
+  if (CalleeName == "pthread_cond_wait_1" ||
+      CalleeName == "pthread_cond_wait_2") {
+    if (Call->getNumArgs() < 2)
+      return std::nullopt;
+    std::optional<std::string> Condition = sourceText(Call->getArg(0), Context);
+    std::optional<std::string> Mutex = sourceText(Call->getArg(1), Context);
+    if (!Condition || !Mutex)
+      return std::nullopt;
+    return "__cs_" + CalleeName + "((void *)" + *Condition +
+           ", (void *)" + *Mutex + ")";
+  }
+  if (CalleeName == "pthread_barrier_init") {
+    if (Call->getNumArgs() < 3)
+      return std::nullopt;
+    std::optional<std::string> Address = sourceText(Call->getArg(0), Context);
+    std::optional<std::string> Count = sourceText(Call->getArg(2), Context);
+    if (!Address || !Count)
+      return std::nullopt;
+    return "__cs_pthread_barrier_init((void *)" + *Address +
+           ", (unsigned)(" + *Count + "))";
+  }
+  if (CalleeName == "pthread_key_create") {
+    if (Call->getNumArgs() < 2)
+      return std::nullopt;
+    std::optional<std::string> Key = sourceText(Call->getArg(0), Context);
+    std::optional<std::string> Destructor = sourceText(Call->getArg(1), Context);
+    if (!Key || !Destructor)
+      return std::nullopt;
+    return "__cs_pthread_key_create((unsigned *)" + *Key + ", " +
+           *Destructor + ")";
+  }
+  if (CalleeName == "pthread_setspecific") {
+    if (Call->getNumArgs() < 2)
+      return std::nullopt;
+    std::optional<std::string> Key = sourceText(Call->getArg(0), Context);
+    std::optional<std::string> Value = sourceText(Call->getArg(1), Context);
+    if (!Key || !Value)
+      return std::nullopt;
+    return "__cs_pthread_setspecific((unsigned)(" + *Key + "), (void *)" +
+           *Value + ")";
+  }
+  return std::nullopt;
+}
+
 std::string generatedLabelName(const ThreadPlan &Plan, unsigned StatementIndex) {
   return formatv("__cs_label_{0}_{1}", Plan.Name, StatementIndex).str();
 }
@@ -494,13 +587,18 @@ public:
     if (!Offset || !Original || *Offset < BaseOffset)
       return true;
 
+    unsigned Length = static_cast<unsigned>(Original->size());
+    // clang's ReturnStmt token range ends before the statement semicolon.
+    if (*Offset + Length < Context.CurrentSource.size() &&
+        Context.CurrentSource[*Offset + Length] == ';')
+      ++Length;
+
     std::string Replacement = "__cs_pthread_exit(); return";
     if (const Expr *Value = Return->getRetValue())
       Replacement += " " + rewriteThreadReturnValue(Value, Context);
     Replacement += ";";
     Replacements.push_back(TextReplacement{
-        *Offset - BaseOffset, static_cast<unsigned>(Original->size()),
-        std::move(Replacement)});
+        *Offset - BaseOffset, Length, std::move(Replacement)});
     return true;
   }
 
@@ -514,18 +612,64 @@ private:
   std::vector<TextReplacement> Replacements;
 };
 
-std::string rewriteNestedThreadReturns(const Stmt *Statement,
-                                       StringRef Original,
-                                       const PipelineContext &Context) {
+class NestedRuntimeCallCollector
+    : public RecursiveASTVisitor<NestedRuntimeCallCollector> {
+public:
+  NestedRuntimeCallCollector(const PipelineContext &Context, unsigned BaseOffset,
+                             const StringMap<unsigned> &ThreadIndices)
+      : Context(Context), BaseOffset(BaseOffset), ThreadIndices(ThreadIndices) {}
+
+  bool VisitCallExpr(CallExpr *Call) {
+    std::optional<std::string> Replacement =
+        rewriteNestedRuntimeCall(Call, ThreadIndices, Context);
+    if (!Replacement)
+      return true;
+    std::optional<unsigned> Offset =
+        getFileOffset(Call->getBeginLoc(), Context.getSourceManager());
+    std::optional<std::string> Original = sourceText(Call, Context);
+    if (!Offset || !Original || *Offset < BaseOffset)
+      return true;
+    Replacements.push_back(TextReplacement{
+        *Offset - BaseOffset, static_cast<unsigned>(Original->size()),
+        std::move(*Replacement)});
+    return true;
+  }
+
+  std::vector<TextReplacement> takeReplacements() {
+    return std::move(Replacements);
+  }
+
+private:
+  const PipelineContext &Context;
+  unsigned BaseOffset;
+  const StringMap<unsigned> &ThreadIndices;
+  std::vector<TextReplacement> Replacements;
+};
+
+std::string rewriteNestedLazyContent(const Stmt *Statement, StringRef Original,
+                                     bool RewriteThreadReturns,
+                                     const StringMap<unsigned> &ThreadIndices,
+                                     const PipelineContext &Context) {
   std::optional<unsigned> BaseOffset =
       getFileOffset(Statement->getBeginLoc(), Context.getSourceManager());
   if (!BaseOffset)
     return Original.str();
 
-  ThreadExitCollector Collector(Context, *BaseOffset);
-  Collector.TraverseStmt(const_cast<Stmt *>(Statement));
+  std::vector<TextReplacement> Replacements;
+  if (RewriteThreadReturns) {
+    ThreadExitCollector ExitCollector(Context, *BaseOffset);
+    ExitCollector.TraverseStmt(const_cast<Stmt *>(Statement));
+    Replacements = ExitCollector.takeReplacements();
+  }
+  NestedRuntimeCallCollector RuntimeCollector(Context, *BaseOffset,
+                                              ThreadIndices);
+  RuntimeCollector.TraverseStmt(const_cast<Stmt *>(Statement));
+  std::vector<TextReplacement> RuntimeReplacements =
+      RuntimeCollector.takeReplacements();
+  Replacements.insert(Replacements.end(), RuntimeReplacements.begin(),
+                      RuntimeReplacements.end());
   std::string Rewritten = Original.str();
-  applyReplacements(Rewritten, Collector.takeReplacements());
+  applyReplacements(Rewritten, std::move(Replacements));
   return Rewritten;
 }
 
@@ -558,7 +702,9 @@ std::string rewriteFunctionBody(
     if (!Text)
       continue;
 
-    std::string Rewritten = ensureStatementTerminator(*Text, Statement);
+    std::string Rewritten = rewriteNestedLazyContent(
+        Statement, ensureStatementTerminator(*Text, Statement),
+        !Plan.IsMainThread, ThreadIndices, Context);
     if (!Plan.IsMainThread) {
       if (const auto *Return = dyn_cast<ReturnStmt>(Statement)) {
         Rewritten = "__cs_pthread_exit();";
@@ -566,8 +712,6 @@ std::string rewriteFunctionBody(
           Rewritten += " return " + rewriteThreadReturnValue(Value, Context) + ";";
         else
           Rewritten += " return;";
-      } else {
-        Rewritten = rewriteNestedThreadReturns(Statement, Rewritten, Context);
       }
     }
     if (const auto *DeclStatement = dyn_cast<DeclStmt>(Statement)) {

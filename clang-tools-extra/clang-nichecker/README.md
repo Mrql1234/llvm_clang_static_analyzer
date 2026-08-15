@@ -491,8 +491,10 @@ diff -u nichecker/Cseq/log/_21_output__replacegoto.c \
 ### 嵌套线程退出回归
 
 `lazyseq` 现在会在 worker 函数的任意嵌套语句块内，把 `return` 改写为先调用
-`__cs_pthread_exit()` 再返回。这样线程特定数据的 destructor 不会因为 `if`、循环等
-控制流中的提前返回而遗漏。实现入口是
+`__cs_pthread_exit()` 再返回；同时会把嵌套在 `if`、循环和复合语句中的
+`pthread_create`、`pthread_join`、mutex、条件变量、屏障和线程特定数据调用改写到
+native lazy runtime。这样线程特定数据的 destructor 不会因为提前返回而遗漏，嵌套
+同步调用也不会漏回原始 pthread API。实现入口是
 `clang-tools-extra/clang-nichecker/lib/Passes/LazySequentializationPass.cpp`，回归输入为
 `clang-tools-extra/clang-nichecker/test/lazy-nested-return-input.c`。
 
@@ -505,7 +507,8 @@ build-clang/bin/clang-nichecker \
   clang-tools-extra/clang-nichecker/test/lazy-nested-return-input.c --
 build-clang/bin/clang -fsyntax-only \
   -Wno-implicit-function-declaration -Wno-return-type /tmp/lazy-nested-return.c
-grep -n '__cs_pthread_exit(); return' /tmp/lazy-nested-return.c
+grep -nE '__cs_pthread_(mutex_lock|mutex_unlock|exit)\\(' \
+  /tmp/lazy-nested-return.c
 ```
 
 ### JDK 11 配置
