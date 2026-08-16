@@ -213,7 +213,7 @@ Python 实现的入口是 `nichecker/Cseq/pycparser/newParser/c_generator.py` �
 ### 算法拆分
 
 1. 后端符号映射：根据 backend 将 `__VERIFIER_assume`、断言和 nondet 原语映射到 `__CPROVER_assume`、`assert`、`nondet_*` 等目标名称。
-2. 位宽降级：消费 lazyseq 输出的 `bitwidth` 元数据，将对应整型声明改成 `unsigned __CPROVER_bitvector[k]`；同时修复 bitvector 数组初始化表达式。
+2. 位宽降级：消费 lazyseq 输出的 `bitwidth` 元数据，将对应整型声明改成 `unsigned __CPROVER_bitvector[k]`；同时将 ISR 屏蔽数组 `__cs_disable_thread` 降级为 1 位 bitvector，并修复 bitvector 数组初始化表达式。
 3. 原始行物化：去掉 `__CSEQ_rawline()` 包装和行标记，恢复 `IF(...)`、标签和 scheduler 中需要原样交给后端的 C 片段，并重新排版缩进。
 4. 运行时与头文件：拼接 lazyseq 传来的 `header`，再按 backend 注入 `cbmc_extra.c`、pthread 定义、系统头信息和最终文件头。
 5. `main_thread` 特化：识别事件/定时线程的 `pthread_create` 与初始化，避免在普通启动路径重复创建这些线程。

@@ -165,6 +165,7 @@ llvm::Error InstrumenterPass::run(const PipelineContext &Context,
   replaceAll(Source, "__VERIFIER_assume", "__CPROVER_assume");
   replaceAll(Source, "__VERIFIER_assertext", "__CPROVER_assert");
   lowerControlVariable(Source, "__cs_active_thread", 1);
+  lowerControlVariable(Source, "__cs_disable_thread", 1);
   lowerControlVariable(Source, "__cs_pc", PcWidth);
   lowerControlVariable(Source, "__cs_pc_cs", PcWidth);
   lowerControlVariable(Source, "__cs_thread_lines", PcWidth);
