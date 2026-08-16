@@ -150,6 +150,23 @@ bool isDeferredInterrupt(const ThreadPlan &Plan) {
   return Plan.IsInterrupt && (Plan.Kind == "event" || Plan.Kind == "timer");
 }
 
+bool hasRandomConstraint(const std::vector<ThreadPlan> &Plans) {
+  for (const ThreadPlan &Plan : Plans)
+    if (Plan.IsInterrupt && Plan.Kind == "random" && Plan.Constraint != 0)
+      return true;
+  return false;
+}
+
+std::string buildRandomTimeGate(const ThreadPlan &Plan,
+                                const std::vector<ThreadPlan> &Plans,
+                                bool IsMultiThreaded, unsigned Round) {
+  if (IsMultiThreaded || Round == 0 || !hasRandomConstraint(Plans) ||
+      !Plan.IsInterrupt || Plan.Kind != "random")
+    return "";
+  return "(__cs_counter - __cs_counter_before >= " +
+         std::to_string(Plan.Constraint) + ")";
+}
+
 std::string normalizeEventText(StringRef Text) {
   std::string Normalized;
   for (char Character : Text)
@@ -263,6 +280,8 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans,
   OS << "static unsigned __cs_active_thread[" << Plans.size() << "] = {1};\n";
   OS << "static unsigned __cs_disable_thread[" << Plans.size() << "] = {0};\n";
   OS << "static unsigned __cs_timer_counter[" << Plans.size() << "] = {0};\n";
+  OS << "static unsigned __cs_counter = 0;\n";
+  OS << "static unsigned __cs_counter_before = 0;\n";
   OS << "static unsigned __cs_pc[" << Plans.size() << "] = {0};\n";
   OS << "static unsigned __cs_pc_cs[" << Plans.size() << "] = {0};\n";
   OS << "static unsigned __cs_thread_index = 0;\n";
@@ -448,6 +467,8 @@ std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
           formatv("__cs_tmp_t{0}_r{1}", Plan.Index, Round).str();
       const std::string InputGate =
           buildPythonInputGate(Plan, Plans, IsMultiThreaded, Round == 0);
+      const std::string TimeGate =
+          buildRandomTimeGate(Plan, Plans, IsMultiThreaded, Round);
       const bool FirstActivationOnly =
           isHighestPriorityInterrupt(Plan, Plans, IsMultiThreaded);
       OS << "  {\n";
@@ -457,6 +478,8 @@ std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
            << "] || __cs_disable_thread[" << Plan.Index << "] == 1";
         if (!InputGate.empty())
           OS << " || !(" << InputGate << ")";
+        if (!TimeGate.empty())
+          OS << " || !(" << TimeGate << ")";
         if (FirstActivationOnly)
           OS << " || __cs_pc[" << Plan.Index << "] != 0";
         OS << ")\n      goto " << Temp << "_done;\n";
@@ -483,6 +506,8 @@ std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
         OS << "  " << Temp << "_done:\n";
       OS << "    ;\n  }\n";
     }
+    if (hasRandomConstraint(Plans))
+      OS << "  __cs_counter_before = __cs_counter;\n";
   }
   // Python lazyseq schedules main once more after the worker rounds. This is
   // where joins and the tail of a partially executed main_thread can finish.
@@ -529,6 +554,8 @@ std::string buildNoRoundRobinScheduler(const std::vector<ThreadPlan> &Plans,
         formatv("__cs_run_t{0}_r{1}", Plan.Index, Round).str();
     const std::string InputGate =
         buildPythonInputGate(Plan, Plans, IsMultiThreaded, IsFirstRound);
+    const std::string TimeGate = buildRandomTimeGate(
+        Plan, Plans, IsMultiThreaded, IsFirstRound ? 0 : Round);
     const bool FirstActivationOnly =
         isHighestPriorityInterrupt(Plan, Plans, IsMultiThreaded);
     OS << "  {\n";
@@ -541,6 +568,8 @@ std::string buildNoRoundRobinScheduler(const std::vector<ThreadPlan> &Plans,
        << " && (__cs_disable_thread[" << Plan.Index << "] != 1))";
     if (!InputGate.empty())
       OS << " && (" << InputGate << ")";
+    if (!TimeGate.empty())
+      OS << " && (" << TimeGate << ")";
     if (FirstActivationOnly)
       OS << " && (__cs_pc[" << Plan.Index << "] == 0)";
     OS << ";\n";
@@ -599,6 +628,8 @@ std::string buildNoRoundRobinScheduler(const std::vector<ThreadPlan> &Plans,
     for (const ThreadPlan &Plan : Plans)
       if (!Plan.IsMainThread)
         emitWorker(Plan, Round, Round == 0);
+    if (hasRandomConstraint(Plans))
+      OS << "  __cs_counter_before = __cs_counter;\n";
   }
 
   const std::string FinalTemp = formatv("__cs_tmp_t0_r{0}", Rounds).str();
@@ -1227,6 +1258,8 @@ std::string rewriteFunctionBody(
       }
       const auto *Assignment = dyn_cast<BinaryOperator>(Statement);
       if (Assignment && Assignment->isAssignmentOp()) {
+        if (hasRandomConstraint(Plans))
+          Rewritten += "\n__cs_counter++;";
         for (const ThreadPlan &Candidate : Plans) {
           if (Candidate.Kind != "timer" || Candidate.Period == 0)
             continue;

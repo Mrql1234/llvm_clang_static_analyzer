@@ -847,3 +847,17 @@ grep -n -E '__cs_timer_counter\[3\]|__cs_active_thread\[3\] = [01]' \
 ```
 
 timer ISR 同样延后到主任务中激活。每个主任务赋值使对应 `__cs_timer_counter` 加一；计数到达 `t + constraint` 时，runtime 清零计数、激活 timer 线程、清零其 PC 并让出当前上下文。当前版本使用确定性初始相位和每个 timer 的单一线程实例；Python 的 nondet 初始相位、周期实例复制及完整时间约束仍待迁移。
+
+### 随机 ISR 时间约束回归
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,interrupt-lowering,duplicator,lazyseq,instrumenter \
+  --isr-config=clang-tools-extra/clang-nichecker/test/lazy-interrupt-constraint-config.json \
+  --rounds=2 -output=/tmp/lazy-interrupt-constraint.c \
+  clang-tools-extra/clang-nichecker/test/lazy-interrupt-priority-input.c -- -w
+grep -n -E '__cs_counter|__cs_counter_before' /tmp/lazy-interrupt-constraint.c
+```
+
+配置中任一 random ISR 的非零 `constraint` 会启用全局计数器；`main_task_0` 的赋值递增计数，每轮 scheduler 结束记录 `__cs_counter_before`。从第二轮开始，每个随机 ISR 必须满足 `__cs_counter - __cs_counter_before >= constraint` 才能运行。该部分对应 Python lazyseq 的随机 ISR 最小间隔规则；event 最大间隔和 context-bounded 分支仍待收敛。
