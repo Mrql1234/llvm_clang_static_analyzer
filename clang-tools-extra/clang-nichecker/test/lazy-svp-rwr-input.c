@@ -13,6 +13,7 @@ void *reader(void *unused) {
   int second;
   first = state;
   second = state;
+  state = 3;
   return 0;
 }
 

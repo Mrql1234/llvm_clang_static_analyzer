@@ -997,6 +997,21 @@ grep -n -E '__cs_svp_rwr_(read|last|seen)|assert\(__cs_svp_rwr_read' \
 
 预期产物含有 `__cs_svp_rwr_last`、`__cs_svp_rwr_seen`、读取快照与断言，以及每次 `state` 直接写入后的 `seen` 清空。数组下标、指针别名、复杂表达式以及 `rww`、`wwr`、`wrw` 仍在继续迁移，不能把该标量回归视为完整 SVP 覆盖。
 
+同一输入也覆盖 `rww` 的读后快照、写前比较分支：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,duplicator,lazyseq,instrumenter \
+  --svp-mode=rww --svp-type=int --svp-var=state --rounds=1 \
+  -output=/tmp/lazy-svp-rww.c \
+  clang-tools-extra/clang-nichecker/test/lazy-svp-rwr-input.c -- -w
+grep -n -E '__cs_svp_rww_(read|last|seen)|assert\(state == __cs_svp_rww' \
+  /tmp/lazy-svp-rww.c
+```
+
+该标量 rww 实现对应 Python 在读取后保存 `rww_r_tmp*`、在后续直接写入之前比较保存值的规则。`wwr`、`wrw` 及数组/指针仍未完成。
+
 ### 随机 ISR 时间约束回归
 
 ```bash

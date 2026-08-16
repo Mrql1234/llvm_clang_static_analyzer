@@ -267,6 +267,12 @@ public:
   }
 
   const std::set<unsigned> &writeEnds() const { return WriteEnds; }
+  std::vector<unsigned> writeBegins() const {
+    std::set<unsigned> Begins;
+    for (const auto &Range : WriteRanges)
+      Begins.insert(Range.first);
+    return std::vector<unsigned>(Begins.begin(), Begins.end());
+  }
   StringRef type() const { return Type; }
 
 private:
@@ -354,6 +360,55 @@ RwrInstrumentation instrumentRwrScalar(const PipelineContext &Context,
   return Result;
 }
 
+RwrInstrumentation instrumentRwwScalar(const PipelineContext &Context,
+                                        std::string &Source,
+                                        unsigned ThreadCount) {
+  RwrInstrumentation Result;
+  const StringRef Variable = Context.Options.SvpVariable;
+  if (!isIdentifier(Variable) ||
+      StringRef(Source).contains("__CS_SVP_RWW_INSTRUMENTED"))
+    return Result;
+
+  RwrAccessCollector Collector(Context, Source, Variable);
+  Collector.TraverseDecl(Context.getASTContext().getTranslationUnitDecl());
+  const std::vector<unsigned> ReadEnds = Collector.readEnds();
+  const std::vector<unsigned> WriteBegins = Collector.writeBegins();
+  if (ReadEnds.empty() && WriteBegins.empty())
+    return Result;
+
+  Result.Type = Context.Options.SvpType.empty() ? Collector.type().str()
+                                                : Context.Options.SvpType;
+  if (Result.Type.empty())
+    return Result;
+
+  std::map<unsigned, std::string> Insertions;
+  for (unsigned End : ReadEnds) {
+    Insertions[End] += "\n  {\n    " + Result.Type +
+                       " __cs_svp_rww_read = " + Variable.str() +
+                       ";\n    __cs_svp_rww_seen[__cs_thread_index] = 1;\n"
+                       "    __cs_svp_rww_last[__cs_thread_index] = "
+                       "__cs_svp_rww_read;\n  }\n";
+    ++Result.Reads;
+  }
+  for (unsigned Begin : WriteBegins) {
+    Insertions[Begin] +=
+        "if (__cs_svp_rww_seen[__cs_thread_index]) {\n"
+        "    assert(" + Variable.str() +
+        " == __cs_svp_rww_last[__cs_thread_index]);\n"
+        "    __cs_svp_rww_seen[__cs_thread_index] = 0;\n"
+        "  }\n  ";
+    ++Result.Writes;
+  }
+  for (auto It = Insertions.rbegin(); It != Insertions.rend(); ++It)
+    Source.insert(It->first, It->second);
+
+  Source = "#define __CS_SVP_RWW_INSTRUMENTED 1\n" + Result.Type +
+           " __cs_svp_rww_last[" + std::to_string(ThreadCount) +
+           "];\nunsigned __cs_svp_rww_seen[" +
+           std::to_string(ThreadCount) + "];\n\n" + Source;
+  return Result;
+}
+
 } // namespace
 
 llvm::StringRef InstrumenterPass::name() const { return "instrumenter"; }
@@ -376,10 +431,13 @@ llvm::Error InstrumenterPass::run(const PipelineContext &Context,
     return Error::success();
   }
 
-  RwrInstrumentation Rwr;
+  RwrInstrumentation Svp;
   if (Context.Options.SvpMode == "rwr")
-    Rwr = instrumentRwrScalar(Context, Source,
-                               static_cast<unsigned>(ThreadSizes.size()));
+    Svp = instrumentRwrScalar(Context, Source,
+                              static_cast<unsigned>(ThreadSizes.size()));
+  if (Context.Options.SvpMode == "rww")
+    Svp = instrumentRwwScalar(Context, Source,
+                              static_cast<unsigned>(ThreadSizes.size()));
   Source = materializeRawLines(Source);
 
   unsigned MaxThreadSize =
@@ -418,14 +476,24 @@ llvm::Error InstrumenterPass::run(const PipelineContext &Context,
               PcWidth, ThreadWidth)
           .str());
   if (Context.Options.SvpMode == "rwr") {
-    if (Rwr.Reads || Rwr.Writes)
+    if (Svp.Reads || Svp.Writes)
       Result.Notes.push_back(
           formatv("phase6: instrumenter 已插入 rwr 标量访问序监控（变量 {0}，读 {1} 处，写 {2} 处）",
-                  Context.Options.SvpVariable, Rwr.Reads, Rwr.Writes)
+                  Context.Options.SvpVariable, Svp.Reads, Svp.Writes)
               .str());
     else
       Result.Notes.push_back(
           "phase6: rwr 当前仅支持命名标量全局变量的直接读写；未发现可插桩访问");
+  }
+  if (Context.Options.SvpMode == "rww") {
+    if (Svp.Reads || Svp.Writes)
+      Result.Notes.push_back(
+          formatv("phase6: instrumenter 已插入 rww 标量访问序监控（变量 {0}，读 {1} 处，写 {2} 处）",
+                  Context.Options.SvpVariable, Svp.Reads, Svp.Writes)
+              .str());
+    else
+      Result.Notes.push_back(
+          "phase6: rww 当前仅支持命名标量全局变量的直接读写；未发现可插桩访问");
   }
   return Error::success();
 }
