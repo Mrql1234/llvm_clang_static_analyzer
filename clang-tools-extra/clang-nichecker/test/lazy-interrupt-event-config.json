@@ -1,0 +1,16 @@
+{
+  "interrupt_low": {
+    "kind": "random",
+    "prio": 1,
+    "t": 0,
+    "event": "",
+    "constraint": 0
+  },
+  "interrupt_high": {
+    "kind": "event",
+    "prio": 0,
+    "t": 0,
+    "event": "state = 0;",
+    "constraint": 1
+  }
+}

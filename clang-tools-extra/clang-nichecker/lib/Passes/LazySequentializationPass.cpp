@@ -30,6 +30,10 @@ struct ThreadPlan {
   bool IsMainThread = false;
   bool IsInterrupt = false;
   unsigned Priority = 0;
+  std::string Kind = "random";
+  unsigned Period = 0;
+  std::string Event;
+  unsigned Constraint = 0;
 };
 
 bool isLazySeqRequested(const PipelineOptions &Options) {
@@ -69,6 +73,48 @@ std::string buildPythonInputGate(const ThreadPlan &Plan,
     OS << "(__cs_pc[" << Candidate.Index << "] == 0 || __cs_pc["
        << Candidate.Index << "] == " << Candidate.StatementCount << ")";
   };
+  auto baseThreadName = [](StringRef Name) {
+    size_t Separator = Name.rfind('_');
+    return Separator == StringRef::npos ? Name : Name.take_front(Separator);
+  };
+
+  if (!IsMultiThreaded && Plan.Name == "main_task_0") {
+    for (const ThreadPlan &Candidate : Plans) {
+      if (Candidate.Index == Plan.Index || Candidate.Priority < Plan.Priority)
+        continue;
+      if (Candidate.Kind != "random" ||
+          (Candidate.Priority != HighestPriority && Candidate.Name != "main"))
+        appendCompletion(Candidate);
+    }
+    return OS.str();
+  }
+
+  if (!IsMultiThreaded && (Plan.Kind == "event" || Plan.Kind == "timer")) {
+    bool HasRandomOrTimer = false;
+    for (const ThreadPlan &Candidate : Plans)
+      HasRandomOrTimer |= Candidate.IsInterrupt &&
+                          (Candidate.Kind == "random" ||
+                           Candidate.Kind == "timer");
+    if (!HasRandomOrTimer)
+      return "";
+    for (const ThreadPlan &Candidate : Plans) {
+      if (Candidate.Index == Plan.Index ||
+          Candidate.Priority < Plan.Priority)
+        continue;
+      const bool SameEventFamily =
+          Plan.Kind == "event" && Candidate.Kind == "event" &&
+          baseThreadName(Candidate.Name) == baseThreadName(Plan.Name);
+      const bool SameTimerFamily =
+          Plan.Kind == "timer" && Candidate.Kind == "timer" &&
+          baseThreadName(Candidate.Name) == baseThreadName(Plan.Name);
+      if ((Plan.Kind == "event" && (SameEventFamily ||
+                                    Candidate.Kind == "timer")) ||
+          (Plan.Kind == "timer" && (SameTimerFamily ||
+                                    Candidate.Kind == "event")))
+        appendCompletion(Candidate);
+    }
+    return OS.str();
+  }
 
   for (const ThreadPlan &Candidate : Plans) {
     if (Candidate.Index == Plan.Index)
@@ -98,6 +144,19 @@ bool isHighestPriorityInterrupt(const ThreadPlan &Plan,
     if (Candidate.IsInterrupt && Candidate.Priority > Plan.Priority)
       return false;
   return true;
+}
+
+bool isDeferredInterrupt(const ThreadPlan &Plan) {
+  return Plan.IsInterrupt && Plan.Kind == "event";
+}
+
+std::string normalizeEventText(StringRef Text) {
+  std::string Normalized;
+  for (char Character : Text)
+    if (!std::isspace(static_cast<unsigned char>(Character)) &&
+        Character != ';')
+      Normalized += Character;
+  return Normalized;
 }
 
 std::optional<std::string> sourceText(const Stmt *Node,
@@ -690,9 +749,11 @@ public:
       if (!SeenEntries.insert(Name).second)
         continue;
       const InterruptInfo *Info = findInterruptInfo(Name, Summary);
-      Plans.push_back(ThreadPlan{Definition, Name,
-                                 static_cast<unsigned>(Plans.size()), 0, false,
-                                 Info != nullptr, Info ? Info->Priority : 0});
+      Plans.push_back(ThreadPlan{
+          Definition, Name, static_cast<unsigned>(Plans.size()), 0, false,
+          Info != nullptr, Info ? Info->Priority : 0,
+          Info ? Info->Kind : "random", Info ? Info->Period : 0,
+          Info ? Info->Event : "", Info ? Info->Constraint : 0});
     }
     if (Plans.size() == 1) {
       return createStringError(inconvertibleErrorCode(),
@@ -999,6 +1060,8 @@ std::string rewriteNestedLazyContent(const Stmt *Statement, StringRef Original,
 
 std::string rewriteFunctionBody(
     const ThreadPlan &Plan, const StringMap<unsigned> &ThreadIndices,
+    const StringSet<> &DeferredThreadNames,
+    const std::vector<ThreadPlan> &Plans,
     const PipelineContext &Context, unsigned &StatementCount) {
   const auto *Body = dyn_cast<CompoundStmt>(Plan.Function->getBody());
   if (!Body)
@@ -1058,9 +1121,15 @@ std::string rewriteFunctionBody(
       const std::string CalleeName = getCalleeName(Call, Context);
       if (CalleeName == "pthread_create") {
         const FunctionDecl *Entry = functionFromThreadStartArgument(Call);
-        auto It = Entry ? ThreadIndices.find(Entry->getName()) : ThreadIndices.end();
-        if (It != ThreadIndices.end())
-          Rewritten = rewriteCreateCall(Call, It->second, Context);
+        auto It =
+            Entry ? ThreadIndices.find(Entry->getName()) : ThreadIndices.end();
+        if (It != ThreadIndices.end()) {
+          if (DeferredThreadNames.contains(Entry->getName()))
+            Rewritten = "__cs_active_thread[" + std::to_string(It->second) +
+                        "] = 0;";
+          else
+            Rewritten = rewriteCreateCall(Call, It->second, Context);
+        }
       } else if (CalleeName == "pthread_join") {
         Rewritten = rewriteJoinCall(Call, Context);
       } else if (CalleeName == "pthread_mutex_init") {
@@ -1139,6 +1208,26 @@ std::string rewriteFunctionBody(
         Rewritten = "__cs_pthread_self();";
       }
     }
+    if (Plan.Name == "main_task_0") {
+      const std::string StatementText = normalizeEventText(*Text);
+      bool TriggeredEvent = false;
+      for (const ThreadPlan &Candidate : Plans) {
+        if (Candidate.Kind != "event" || Candidate.Event.empty() ||
+            StatementText != normalizeEventText(Candidate.Event))
+          continue;
+        Rewritten += "\n__cs_active_thread[" +
+                     std::to_string(Candidate.Index) + "] = 1;";
+        Rewritten += "\n__cs_pc[" + std::to_string(Candidate.Index) + "] = 0;";
+        Rewritten +=
+            "\n__cs_pc_cs[" + std::to_string(Candidate.Index) + "] = 0;";
+        Rewritten += "\n__cs_threadargs[" +
+                     std::to_string(Candidate.Index) + "] = 0;";
+        TriggeredEvent = true;
+      }
+      if (TriggeredEvent)
+        Rewritten += "\n__cs_pc_cs[" + std::to_string(Plan.Index) + "] = " +
+                     std::to_string(StatementIndex + 1) + "; return;";
+    }
 
     if (Rewritten.empty())
       continue;
@@ -1182,6 +1271,10 @@ llvm::Error LazySequentializationPass::run(const PipelineContext &Context,
   StringMap<unsigned> ThreadIndices;
   for (const ThreadPlan &Plan : Plans)
     ThreadIndices[Plan.Name] = Plan.Index;
+  StringSet<> DeferredThreadNames;
+  for (const ThreadPlan &Plan : Plans)
+    if (isDeferredInterrupt(Plan))
+      DeferredThreadNames.insert(Plan.Name);
 
   std::vector<TextReplacement> Replacements;
   for (ThreadPlan &Plan : Plans) {
@@ -1194,7 +1287,8 @@ llvm::Error LazySequentializationPass::run(const PipelineContext &Context,
 
     unsigned StatementCount = 0;
     std::string RewrittenBody =
-        rewriteFunctionBody(Plan, ThreadIndices, Context, StatementCount);
+        rewriteFunctionBody(Plan, ThreadIndices, DeferredThreadNames, Plans,
+                            Context, StatementCount);
     if (RewrittenBody.empty())
       continue;
     Plan.StatementCount = StatementCount;

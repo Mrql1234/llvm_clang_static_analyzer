@@ -795,7 +795,7 @@ build-clang/bin/clang-nichecker \
 grep -n '__cs_disable_thread' /tmp/lazy-interrupt-mask.c
 ```
 
-预期 `interrupt_high_0` 仅在自身 PC 为 0 时启动，且没有优先级等待条件；首轮的 `main_task_0` 不应用完成门控。第二个回归产物应包含 `__cs_disable_thread` 数组、屏蔽/恢复赋值以及每个 scheduler 分支上的屏蔽检查。此行为对应旧 Python 随机 ISR 分支：最高优先级 ISR 可立即抢占，低优先级随机 ISR 只受非最高优先级候选的完成状态约束。当前仍未迁移 GUI `dictfile` 中的 `event`、`timer`、周期和时间约束字段。
+预期 `interrupt_high_0` 仅在自身 PC 为 0 时启动，且没有优先级等待条件；首轮的 `main_task_0` 不应用完成门控。第二个回归产物应包含 `__cs_disable_thread` 数组、屏蔽/恢复赋值以及每个 scheduler 分支上的屏蔽检查。此行为对应旧 Python 随机 ISR 分支：最高优先级 ISR 可立即抢占，低优先级随机 ISR 只受非最高优先级候选的完成状态约束。
 
 Python/C++ 分段对比继续使用本 README 前文的 `lazy_until_replacegoto` 命令：Python 的模块产物位于 `nichecker/Cseq/log/*_output__<模块>.c`，C++ 通过 `--pipeline=<截至模块>` 和 `-output=/tmp/<模块>.c` 输出对应阶段源码。对 ISR 优先级输入，应首先比较 `lazyseq` 后调度器中每个 `__cs_active_thread` 分支的 PC 完成门控。
 
@@ -816,4 +816,19 @@ grep -n -E 'interrupt_(low|high)_0|__cs_pc\[[23]\] != 0' \
   /tmp/lazy-interrupt-config.c
 ```
 
-该回归 JSON 将源注释中的优先级反转，预期 `interrupt_low_0` 而非 `interrupt_high_0` 带有仅首次启动的 PC 条件，证明 lazyseq 使用了原生配置而非注释默认值。event/timer 的动态创建和时间约束将在后续模块继续迁移。
+该回归 JSON 将源注释中的优先级反转，预期 `interrupt_low_0` 而非 `interrupt_high_0` 带有仅首次启动的 PC 条件，证明 lazyseq 使用了原生配置而非注释默认值。
+
+### event 触发回归
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,interrupt-lowering,duplicator,lazyseq,instrumenter \
+  --isr-config=clang-tools-extra/clang-nichecker/test/lazy-interrupt-event-config.json \
+  --rounds=1 -output=/tmp/lazy-interrupt-event.c \
+  clang-tools-extra/clang-nichecker/test/lazy-interrupt-priority-input.c -- -w
+grep -n -E '__cs_active_thread\[3\] = [01]|__cs_pc_cs\[1\]' \
+  /tmp/lazy-interrupt-event.c
+```
+
+`LazySequentializationPass.cpp` 会把 event ISR 的 wrapper 创建改为未激活状态；当 `main_task_0` 处理到 JSON 中 `event` 指定的赋值时，它激活对应线程、清零其 PC 并提前返回当前主任务上下文。event 调度只等待同一 event 副本或 timer，不会被无关随机 ISR 阻塞。timer 的周期计数、多实例创建与 event/timer 的完整时间约束仍待迁移。
