@@ -1010,7 +1010,22 @@ grep -n -E '__cs_svp_rww_(read|last|seen)|assert\(state == __cs_svp_rww' \
   /tmp/lazy-svp-rww.c
 ```
 
-该标量 rww 实现对应 Python 在读取后保存 `rww_r_tmp*`、在后续直接写入之前比较保存值的规则。`wwr`、`wrw` 及数组/指针仍未完成。
+该标量 rww 实现对应 Python 在读取后保存 `rww_r_tmp*`、在后续直接写入之前比较保存值的规则。
+
+同一输入还覆盖 `wwr` 的写后快照、读后比较分支：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,duplicator,lazyseq,instrumenter \
+  --svp-mode=wwr --svp-type=int --svp-var=state --rounds=1 \
+  -output=/tmp/lazy-svp-wwr.c \
+  clang-tools-extra/clang-nichecker/test/lazy-svp-rwr-input.c -- -w
+grep -n -E '__cs_svp_wwr_(write|read|last|seen)|assert\(__cs_svp_wwr_read' \
+  /tmp/lazy-svp-wwr.c
+```
+
+该标量 wwr 实现对应 Python 在写入后保存 `wwr_w_tmp*`、在后续读取时比较保存值的规则。`wrw` 及数组/指针仍未完成。
 
 ### 随机 ISR 时间约束回归
 

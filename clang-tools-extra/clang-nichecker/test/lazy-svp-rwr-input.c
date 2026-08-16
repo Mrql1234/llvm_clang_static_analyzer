@@ -11,9 +11,11 @@ void *writer(void *unused) {
 void *reader(void *unused) {
   int first;
   int second;
+  int third;
   first = state;
   second = state;
   state = 3;
+  third = state;
   return 0;
 }
 
