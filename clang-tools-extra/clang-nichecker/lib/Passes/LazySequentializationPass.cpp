@@ -147,7 +147,7 @@ bool isHighestPriorityInterrupt(const ThreadPlan &Plan,
 }
 
 bool isDeferredInterrupt(const ThreadPlan &Plan) {
-  return Plan.IsInterrupt && Plan.Kind == "event";
+  return Plan.IsInterrupt && (Plan.Kind == "event" || Plan.Kind == "timer");
 }
 
 std::string normalizeEventText(StringRef Text) {
@@ -262,6 +262,7 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans,
   OS << "#ifndef assert\n#define assert(Condition) \\\n  do { if (!(Condition)) __VERIFIER_error(); } while (0)\n#endif\n";
   OS << "static unsigned __cs_active_thread[" << Plans.size() << "] = {1};\n";
   OS << "static unsigned __cs_disable_thread[" << Plans.size() << "] = {0};\n";
+  OS << "static unsigned __cs_timer_counter[" << Plans.size() << "] = {0};\n";
   OS << "static unsigned __cs_pc[" << Plans.size() << "] = {0};\n";
   OS << "static unsigned __cs_pc_cs[" << Plans.size() << "] = {0};\n";
   OS << "static unsigned __cs_thread_index = 0;\n";
@@ -1224,6 +1225,33 @@ std::string rewriteFunctionBody(
                      std::to_string(Candidate.Index) + "] = 0;";
         TriggeredEvent = true;
       }
+      const auto *Assignment = dyn_cast<BinaryOperator>(Statement);
+      if (Assignment && Assignment->isAssignmentOp()) {
+        for (const ThreadPlan &Candidate : Plans) {
+          if (Candidate.Kind != "timer" || Candidate.Period == 0)
+            continue;
+          const unsigned TriggerPeriod =
+              Candidate.Period + Candidate.Constraint;
+          Rewritten += "\n__cs_timer_counter[" +
+                       std::to_string(Candidate.Index) + "]++;";
+          Rewritten += "\nif (__cs_timer_counter[" +
+                       std::to_string(Candidate.Index) + "] >= " +
+                       std::to_string(TriggerPeriod) + ") {";
+          Rewritten += "\n  __cs_timer_counter[" +
+                       std::to_string(Candidate.Index) + "] = 0;";
+          Rewritten += "\n  __cs_active_thread[" +
+                       std::to_string(Candidate.Index) + "] = 1;";
+          Rewritten += "\n  __cs_pc[" + std::to_string(Candidate.Index) +
+                       "] = 0;";
+          Rewritten += "\n  __cs_pc_cs[" +
+                       std::to_string(Candidate.Index) + "] = 0;";
+          Rewritten += "\n  __cs_threadargs[" +
+                       std::to_string(Candidate.Index) + "] = 0;";
+          Rewritten += "\n  __cs_pc_cs[" + std::to_string(Plan.Index) +
+                       "] = " + std::to_string(StatementIndex + 1) +
+                       "; return;\n}";
+        }
+      }
       if (TriggeredEvent)
         Rewritten += "\n__cs_pc_cs[" + std::to_string(Plan.Index) + "] = " +
                      std::to_string(StatementIndex + 1) + "; return;";
@@ -1341,7 +1369,7 @@ llvm::Error LazySequentializationPass::run(const PipelineContext &Context,
             .str());
   if (Result.Summary.Kind == ProgramKind::InterruptDriven) {
     Result.Notes.push_back(
-        "phase5: native lazyseq 已迁移随机 ISR 的 priority 注释和完成状态门控；event/timer 约束尚未迁移");
+        "phase5: native lazyseq 已迁移随机 ISR priority、event 触发和 timer 周期激活；多实例与完整时间约束尚未迁移");
   }
   return Error::success();
 }

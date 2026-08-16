@@ -831,4 +831,19 @@ grep -n -E '__cs_active_thread\[3\] = [01]|__cs_pc_cs\[1\]' \
   /tmp/lazy-interrupt-event.c
 ```
 
-`LazySequentializationPass.cpp` 会把 event ISR 的 wrapper 创建改为未激活状态；当 `main_task_0` 处理到 JSON 中 `event` 指定的赋值时，它激活对应线程、清零其 PC 并提前返回当前主任务上下文。event 调度只等待同一 event 副本或 timer，不会被无关随机 ISR 阻塞。timer 的周期计数、多实例创建与 event/timer 的完整时间约束仍待迁移。
+`LazySequentializationPass.cpp` 会把 event ISR 的 wrapper 创建改为未激活状态；当 `main_task_0` 处理到 JSON 中 `event` 指定的赋值时，它激活对应线程、清零其 PC 并提前返回当前主任务上下文。event 调度只等待同一 event 副本或 timer，不会被无关随机 ISR 阻塞。
+
+### timer 周期回归
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,interrupt-lowering,duplicator,lazyseq,instrumenter \
+  --isr-config=clang-tools-extra/clang-nichecker/test/lazy-interrupt-timer-config.json \
+  --rounds=1 -output=/tmp/lazy-interrupt-timer.c \
+  clang-tools-extra/clang-nichecker/test/lazy-interrupt-priority-input.c -- -w
+grep -n -E '__cs_timer_counter\[3\]|__cs_active_thread\[3\] = [01]' \
+  /tmp/lazy-interrupt-timer.c
+```
+
+timer ISR 同样延后到主任务中激活。每个主任务赋值使对应 `__cs_timer_counter` 加一；计数到达 `t + constraint` 时，runtime 清零计数、激活 timer 线程、清零其 PC 并让出当前上下文。当前版本使用确定性初始相位和每个 timer 的单一线程实例；Python 的 nondet 初始相位、周期实例复制及完整时间约束仍待迁移。
