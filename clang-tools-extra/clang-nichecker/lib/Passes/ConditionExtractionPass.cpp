@@ -256,12 +256,6 @@ llvm::StringRef ConditionExtractionPass::name() const {
 
 llvm::Error ConditionExtractionPass::run(const PipelineContext &Context,
                                          TransformResult &Result) const {
-  if (Result.Summary.Kind == ProgramKind::InterruptDriven) {
-    Result.Notes.push_back(
-        "phase4: 中断输入暂时跳过条件抽取，避免与 main 降级重写产生重叠替换");
-    return llvm::Error::success();
-  }
-
   ASTContext &AST = Context.getASTContext();
   ConditionExtractorVisitor Extractor(AST, Context.CurrentSource);
   Extractor.TraverseDecl(AST.getTranslationUnitDecl());

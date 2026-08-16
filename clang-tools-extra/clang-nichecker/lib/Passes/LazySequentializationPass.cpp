@@ -217,9 +217,12 @@ std::string indentLines(StringRef Text, StringRef Prefix) {
 std::string ensureStatementTerminator(StringRef Text, const Stmt *Node) {
   std::string Result = Text.rtrim(" \t\r\n").str();
   if ((isa<Expr>(Node) || isa<DeclStmt>(Node) || isa<ReturnStmt>(Node) ||
-       isa<BreakStmt>(Node) || isa<ContinueStmt>(Node) || isa<GotoStmt>(Node)) &&
+       isa<BreakStmt>(Node) || isa<ContinueStmt>(Node) || isa<GotoStmt>(Node) ||
+       isa<IfStmt>(Node) || isa<WhileStmt>(Node) || isa<ForStmt>(Node)) &&
       !Result.empty() && !StringRef(Result).ends_with(";")) {
-    Result += ';';
+    // Control-statement source ranges omit a non-compound body's semicolon.
+    if (!StringRef(Result).ends_with("}"))
+      Result += ';';
   }
   return Result;
 }

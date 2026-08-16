@@ -100,12 +100,6 @@ llvm::StringRef VariableRenamingPass::name() const {
 
 llvm::Error VariableRenamingPass::run(const PipelineContext &Context,
                                       TransformResult &Result) const {
-  if (Result.Summary.Kind == ProgramKind::InterruptDriven) {
-    Result.Notes.push_back(
-        "phase4: 中断输入暂时跳过局部变量改名，避免与 main 降级重写产生重叠替换");
-    return llvm::Error::success();
-  }
-
   ASTContext &AST = Context.getASTContext();
   ScopedVariableRenameCollector Collector(AST);
   Collector.TraverseDecl(AST.getTranslationUnitDecl());

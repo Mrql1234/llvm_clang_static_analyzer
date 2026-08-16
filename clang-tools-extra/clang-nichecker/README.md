@@ -768,6 +768,19 @@ build-clang/bin/clang -fsyntax-only /tmp/lazy-constants-native.c
 
 ## 2026-08：中断入口与随机优先级
 
+中断输入不再跳过 `conditionextractor` 和 `varnames`。入口分别为 `clang-tools-extra/clang-nichecker/lib/Passes/ConditionExtractionPass.cpp` 与 `clang-tools-extra/clang-nichecker/lib/Passes/VariableRenamingPass.cpp`；回归输入为 `clang-tools-extra/clang-nichecker/test/lazy-interrupt-normalization-input.c`。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,interrupt-lowering,conditionextractor,varnames \
+  -output=/tmp/lazy-interrupt-normalization.c \
+  clang-tools-extra/clang-nichecker/test/lazy-interrupt-normalization-input.c -- -w
+build-clang/bin/clang -fsyntax-only /tmp/lazy-interrupt-normalization.c
+```
+
+预期产物包含 `__cs_tmp_if_cond_` 条件临时变量，以及 `__cs_local_main_task_local_value` 和 `__cs_local_interrupt_handler_local_value` 这类函数作用域局部变量名。
+
 入口文件：
 
 1. `clang-tools-extra/clang-nichecker/lib/Passes/InterruptLoweringPass.cpp`：将原始 `main` 和 ISR 定义降级为 pthread 入口，并从当前 AST 的 `pthread_create` 原型推导线程句柄类型；没有原型的旧样例保持 `unsigned` 回退。
