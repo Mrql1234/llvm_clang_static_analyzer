@@ -3,6 +3,8 @@
 
 #include "llvm/ADT/StringSet.h"
 
+#include <cctype>
+#include <cstring>
 #include <vector>
 
 using namespace clang;
@@ -22,6 +24,56 @@ static std::string pthreadHandleType(const ASTContext &AST) {
   // Old nichecker examples often provide only a function declaration. Keep
   // their source parseable until lazyseq replaces pthread_create.
   return "unsigned";
+}
+
+static const InterruptInfo *findInterruptInfo(llvm::StringRef Name,
+                                              const ProgramSummary &Summary) {
+  for (const InterruptInfo &Info : Summary.InterruptInfos)
+    if (Info.Name == Name)
+      return &Info;
+  return nullptr;
+}
+
+static unsigned countInfiniteLoopStatements(llvm::StringRef Source) {
+  unsigned Statements = 0;
+  size_t SearchFrom = 0;
+  while (SearchFrom < Source.size()) {
+    size_t While = Source.find("while", SearchFrom);
+    if (While == llvm::StringRef::npos)
+      break;
+    SearchFrom = While + strlen("while");
+    size_t Cursor = While + strlen("while");
+    while (Cursor < Source.size() && isspace(static_cast<unsigned char>(Source[Cursor])))
+      ++Cursor;
+    if (Cursor >= Source.size() || Source[Cursor++] != '(')
+      continue;
+    while (Cursor < Source.size() && isspace(static_cast<unsigned char>(Source[Cursor])))
+      ++Cursor;
+    if (Cursor >= Source.size() || Source[Cursor++] != '1')
+      continue;
+    while (Cursor < Source.size() && isspace(static_cast<unsigned char>(Source[Cursor])))
+      ++Cursor;
+    if (Cursor >= Source.size() || Source[Cursor++] != ')')
+      continue;
+    while (Cursor < Source.size() && isspace(static_cast<unsigned char>(Source[Cursor])))
+      ++Cursor;
+    if (Cursor >= Source.size() || Source[Cursor] != '{')
+      continue;
+    const size_t BodyBegin = ++Cursor;
+    unsigned Depth = 1;
+    while (Cursor < Source.size() && Depth) {
+      if (Source[Cursor] == '{')
+        ++Depth;
+      else if (Source[Cursor] == '}')
+        --Depth;
+      ++Cursor;
+    }
+    if (Depth)
+      break;
+    Statements += Source.slice(BodyBegin, Cursor - 1).count(';');
+    SearchFrom = Cursor;
+  }
+  return Statements;
 }
 
 llvm::StringRef InterruptLoweringPass::name() const {
@@ -71,17 +123,33 @@ llvm::Error InterruptLoweringPass::run(const PipelineContext &Context,
   std::string Replacement;
   llvm::raw_string_ostream OS(Replacement);
   const std::string PthreadHandleType = pthreadHandleType(Context.getASTContext());
+  const unsigned InfiniteLoopStatements =
+      countInfiniteLoopStatements(*MainBodyText);
+  std::vector<std::string> InterruptStarts;
+  for (const std::string &Name : Result.Summary.InterruptFunctions) {
+    const InterruptInfo *Info = findInterruptInfo(Name, Result.Summary);
+    unsigned Instances = 1;
+    if (Info && Info->Kind == "event")
+      Instances = Context.Options.Unwind;
+    else if (Info && Info->Kind == "timer")
+      Instances = Info->Period
+                      ? Context.Options.Unwind * InfiniteLoopStatements /
+                            Info->Period
+                      : 0;
+    for (unsigned Instance = 0; Instance < Instances; ++Instance)
+      InterruptStarts.push_back(Name);
+  }
   OS << "void *main_task(void *__cs_param_main_task_arg)\n"
      << *MainBodyText << "\n\n";
   OS << "int main()\n{\n";
   OS << "  " << PthreadHandleType << " __cs_local_main_t0";
-  for (size_t I = 0; I < Result.Summary.InterruptFunctions.size(); ++I)
+  for (size_t I = 0; I < InterruptStarts.size(); ++I)
     OS << ", __cs_local_isr_t" << I;
   OS << ";\n";
   OS << "  pthread_create(&__cs_local_main_t0, 0, main_task, 0);\n";
-  for (size_t I = 0; I < Result.Summary.InterruptFunctions.size(); ++I)
+  for (size_t I = 0; I < InterruptStarts.size(); ++I)
     OS << "  pthread_create(&__cs_local_isr_t" << I << ", 0, "
-       << Result.Summary.InterruptFunctions[I] << ", 0);\n";
+       << InterruptStarts[I] << ", 0);\n";
   OS << "  return 0;\n";
   OS << "}\n";
   OS.flush();

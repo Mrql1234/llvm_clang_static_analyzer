@@ -857,11 +857,29 @@ build-clang/bin/clang-nichecker \
   --isr-config=clang-tools-extra/clang-nichecker/test/lazy-interrupt-timer-config.json \
   --rounds=1 -output=/tmp/lazy-interrupt-timer.c \
   clang-tools-extra/clang-nichecker/test/lazy-interrupt-priority-input.c -- -w
-grep -n -E '__cs_timer_counter\[3\]|__cs_active_thread\[3\] = [01]' \
+grep -n -E '__cs_timer_counter\[2\]|__cs_active_thread\[2\] = [01]' \
   /tmp/lazy-interrupt-timer.c
 ```
 
-timer ISR 同样延后到主任务中激活。每个主任务赋值使对应 `__cs_timer_counter` 加一；计数到达 `t + constraint` 时，runtime 清零计数、激活 timer 线程、清零其 PC 并让出当前上下文。当前版本使用确定性初始相位和每个 timer 的单一线程实例；Python 的 nondet 初始相位、周期实例复制及完整时间约束仍待迁移。
+timer ISR 同样延后到主任务中激活。每个主任务赋值使对应 `__cs_timer_counter` 加一；计数到达 `t + constraint` 时，runtime 清零计数、激活 timer 线程、清零其 PC 并让出当前上下文。当前版本使用确定性初始相位；timer 多实例和循环体内的赋值点均已迁移，Python 的 nondet 初始相位与完整时间约束仍待收敛。
+
+### timer 多实例回归
+
+入口实现为 `clang-tools-extra/clang-nichecker/lib/Passes/InterruptLoweringPass.cpp` 和 `clang-tools-extra/clang-nichecker/lib/Passes/LazySequentializationPass.cpp`；回归输入为 `clang-tools-extra/clang-nichecker/test/lazy-interrupt-timer-multi-input.c`，JSON 配置为 `clang-tools-extra/clang-nichecker/test/lazy-interrupt-timer-multi-config.json`。它对应 Python `nichecker.py` 的实例数公式：`unwind * while(1) 循环体中的分号数 / t`。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,interrupt-lowering,duplicator,lazyseq,instrumenter \
+  --isr-config=clang-tools-extra/clang-nichecker/test/lazy-interrupt-timer-multi-config.json \
+  --unwind=2 --rounds=1 -output=/tmp/lazy-interrupt-timer-multi.c \
+  clang-tools-extra/clang-nichecker/test/lazy-interrupt-timer-multi-input.c -- -w
+grep -n -E 'interrupt_timer_[01]|__cs_timer_counter\[1\]|__cs_active_thread\[[12]\]' \
+  /tmp/lazy-interrupt-timer-multi.c
+```
+
+预期 wrapper 中存在两次 `pthread_create(... interrupt_timer, ...)`，duplicator 后为 `interrupt_timer_0` 和 `interrupt_timer_1`。主任务循环体的每个计时点只递增 `__cs_timer_counter[2]`；到期后按顺序激活第一个未激活副本，并在其已激活时继续尝试下一个副本。当前仍使用确定性初始相位，timer 的 `constraint` 暂按 `t + constraint` 延后首次及后续触发。
 
 ### 随机 ISR 时间约束回归
 

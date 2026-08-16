@@ -49,6 +49,13 @@ const InterruptInfo *findInterruptInfo(StringRef Name,
   return nullptr;
 }
 
+// Duplicator appends an instance suffix to ISR entry names. Keep the original
+// handler name as the timer/event family identity.
+StringRef baseThreadName(StringRef Name) {
+  size_t Separator = Name.rfind('_');
+  return Separator == StringRef::npos ? Name : Name.take_front(Separator);
+}
+
 std::string buildPythonInputGate(const ThreadPlan &Plan,
                                  const std::vector<ThreadPlan> &Plans,
                                  bool IsMultiThreaded,
@@ -73,11 +80,6 @@ std::string buildPythonInputGate(const ThreadPlan &Plan,
     OS << "(__cs_pc[" << Candidate.Index << "] == 0 || __cs_pc["
        << Candidate.Index << "] == " << Candidate.StatementCount << ")";
   };
-  auto baseThreadName = [](StringRef Name) {
-    size_t Separator = Name.rfind('_');
-    return Separator == StringRef::npos ? Name : Name.take_front(Separator);
-  };
-
   if (!IsMultiThreaded && Plan.Name == "main_task_0") {
     for (const ThreadPlan &Candidate : Plans) {
       if (Candidate.Index == Plan.Index || Candidate.Priority < Plan.Priority)
@@ -987,6 +989,42 @@ std::string rewriteThreadReturnValue(const Expr *Value,
   return *Text;
 }
 
+std::string buildDeferredTimerActivation(const ThreadPlan &Plan,
+                                         const std::vector<ThreadPlan> &Plans,
+                                         unsigned StatementIndex) {
+  std::string Activation;
+  raw_string_ostream OS(Activation);
+  const StringRef YieldReturn = Plan.Function->getReturnType()->isVoidType()
+                                    ? "return;"
+                                    : "return 0;";
+  StringSet<> TimerFamilies;
+  for (const ThreadPlan &Candidate : Plans) {
+    if (Candidate.Kind != "timer" || Candidate.Period == 0)
+      continue;
+    const std::string Family = baseThreadName(Candidate.Name).str();
+    if (!TimerFamilies.insert(Family).second)
+      continue;
+    const unsigned TriggerPeriod = Candidate.Period + Candidate.Constraint;
+    OS << "\n__cs_timer_counter[" << Candidate.Index << "]++;\n";
+    OS << "if (__cs_timer_counter[" << Candidate.Index << "] >= "
+       << TriggerPeriod << ") {\n";
+    OS << "  __cs_timer_counter[" << Candidate.Index << "] = 0;\n";
+    for (const ThreadPlan &Instance : Plans) {
+      if (Instance.Kind != "timer" || baseThreadName(Instance.Name) != Family)
+        continue;
+      OS << "  if (!__cs_active_thread[" << Instance.Index << "]) {\n";
+      OS << "    __cs_active_thread[" << Instance.Index << "] = 1;\n";
+      OS << "    __cs_pc[" << Instance.Index << "] = 0;\n";
+      OS << "    __cs_pc_cs[" << Instance.Index << "] = 0;\n";
+      OS << "    __cs_threadargs[" << Instance.Index << "] = 0;\n";
+      OS << "    __cs_pc_cs[" << Plan.Index << "] = " << StatementIndex + 1
+         << "; " << YieldReturn << "\n  }\n";
+    }
+    OS << "}\n";
+  }
+  return OS.str();
+}
+
 class ThreadExitCollector
     : public RecursiveASTVisitor<ThreadExitCollector> {
 public:
@@ -1062,10 +1100,67 @@ private:
   std::vector<TextReplacement> Replacements;
 };
 
+class NestedTimerActivationCollector
+    : public RecursiveASTVisitor<NestedTimerActivationCollector> {
+public:
+  NestedTimerActivationCollector(const PipelineContext &Context,
+                                 unsigned BaseOffset, const ThreadPlan &Plan,
+                                 const std::vector<ThreadPlan> &Plans,
+                                 unsigned StatementIndex)
+      : Context(Context), BaseOffset(BaseOffset), Plan(Plan), Plans(Plans),
+        StatementIndex(StatementIndex) {}
+
+  bool VisitBinaryOperator(BinaryOperator *Assignment) {
+    if (!Assignment->isAssignmentOp())
+      return true;
+    std::optional<unsigned> EndOffset =
+        getFileOffset(Assignment->getEndLoc(), Context.getSourceManager());
+    std::optional<unsigned> TokenLength = getTokenLength(
+        Assignment->getEndLoc(), Context.getSourceManager(), Context.getLangOpts());
+    if (!EndOffset || !TokenLength || *EndOffset < BaseOffset)
+      return true;
+    unsigned InsertOffset = *EndOffset + *TokenLength;
+    while (InsertOffset < Context.CurrentSource.size() &&
+           std::isspace(static_cast<unsigned char>(
+               Context.CurrentSource[InsertOffset])))
+      ++InsertOffset;
+    if (InsertOffset >= Context.CurrentSource.size() ||
+        Context.CurrentSource[InsertOffset] != ';')
+      return true;
+    ++InsertOffset;
+    if (InsertOffset < BaseOffset)
+      return true;
+
+    std::string Activation;
+    if (hasRandomConstraint(Plans))
+      Activation += "\n__cs_counter++;";
+    Activation += buildDeferredTimerActivation(Plan, Plans, StatementIndex);
+    if (!Activation.empty())
+      Replacements.push_back(TextReplacement{InsertOffset - BaseOffset, 0,
+                                             std::move(Activation)});
+    return true;
+  }
+
+  std::vector<TextReplacement> takeReplacements() {
+    return std::move(Replacements);
+  }
+
+private:
+  const PipelineContext &Context;
+  unsigned BaseOffset;
+  const ThreadPlan &Plan;
+  const std::vector<ThreadPlan> &Plans;
+  unsigned StatementIndex;
+  std::vector<TextReplacement> Replacements;
+};
+
 std::string rewriteNestedLazyContent(const Stmt *Statement, StringRef Original,
                                      bool RewriteThreadReturns,
                                      const StringMap<unsigned> &ThreadIndices,
                                      unsigned CurrentThreadIndex,
+                                     const ThreadPlan *Plan,
+                                     const std::vector<ThreadPlan> *Plans,
+                                     unsigned StatementIndex,
                                      const PipelineContext &Context) {
   std::optional<unsigned> BaseOffset =
       getFileOffset(Statement->getBeginLoc(), Context.getSourceManager());
@@ -1085,6 +1180,16 @@ std::string rewriteNestedLazyContent(const Stmt *Statement, StringRef Original,
       RuntimeCollector.takeReplacements();
   Replacements.insert(Replacements.end(), RuntimeReplacements.begin(),
                       RuntimeReplacements.end());
+  if (Plan && Plans && Plan->Name == "main_task_0" &&
+      !isa<BinaryOperator>(Statement)) {
+    NestedTimerActivationCollector TimerCollector(Context, *BaseOffset, *Plan,
+                                                   *Plans, StatementIndex);
+    TimerCollector.TraverseStmt(const_cast<Stmt *>(Statement));
+    std::vector<TextReplacement> TimerReplacements =
+        TimerCollector.takeReplacements();
+    Replacements.insert(Replacements.end(), TimerReplacements.begin(),
+                        TimerReplacements.end());
+  }
   std::string Rewritten = Original.str();
   applyReplacements(Rewritten, std::move(Replacements));
   return Rewritten;
@@ -1123,7 +1228,8 @@ std::string rewriteFunctionBody(
 
     std::string Rewritten = rewriteNestedLazyContent(
         Statement, ensureStatementTerminator(*Text, Statement),
-        !Plan.IsMainThread, ThreadIndices, Plan.Index, Context);
+        !Plan.IsMainThread, ThreadIndices, Plan.Index, &Plan, &Plans,
+        StatementIndex, Context);
     if (!Plan.IsMainThread) {
       if (const auto *Return = dyn_cast<ReturnStmt>(Statement)) {
         Rewritten = "__cs_pthread_exit();";
@@ -1241,53 +1347,34 @@ std::string rewriteFunctionBody(
       }
     }
     if (Plan.Name == "main_task_0") {
+      const StringRef YieldReturn = Plan.Function->getReturnType()->isVoidType()
+                                        ? "return;"
+                                        : "return 0;";
       const std::string StatementText = normalizeEventText(*Text);
-      bool TriggeredEvent = false;
       for (const ThreadPlan &Candidate : Plans) {
         if (Candidate.Kind != "event" || Candidate.Event.empty() ||
             StatementText != normalizeEventText(Candidate.Event))
           continue;
-        Rewritten += "\n__cs_active_thread[" +
+        Rewritten += "\nif (!__cs_active_thread[" +
+                     std::to_string(Candidate.Index) + "]) {";
+        Rewritten += "\n  __cs_active_thread[" +
                      std::to_string(Candidate.Index) + "] = 1;";
-        Rewritten += "\n__cs_pc[" + std::to_string(Candidate.Index) + "] = 0;";
-        Rewritten +=
-            "\n__cs_pc_cs[" + std::to_string(Candidate.Index) + "] = 0;";
-        Rewritten += "\n__cs_threadargs[" +
+        Rewritten += "\n  __cs_pc[" + std::to_string(Candidate.Index) +
+                     "] = 0;";
+        Rewritten += "\n  __cs_pc_cs[" +
                      std::to_string(Candidate.Index) + "] = 0;";
-        TriggeredEvent = true;
+        Rewritten += "\n  __cs_threadargs[" +
+                     std::to_string(Candidate.Index) + "] = 0;";
+        Rewritten += "\n  __cs_pc_cs[" + std::to_string(Plan.Index) +
+                     "] = " + std::to_string(StatementIndex + 1) +
+                     "; " + YieldReturn.str() + "\n}";
       }
       const auto *Assignment = dyn_cast<BinaryOperator>(Statement);
       if (Assignment && Assignment->isAssignmentOp()) {
         if (hasRandomConstraint(Plans))
           Rewritten += "\n__cs_counter++;";
-        for (const ThreadPlan &Candidate : Plans) {
-          if (Candidate.Kind != "timer" || Candidate.Period == 0)
-            continue;
-          const unsigned TriggerPeriod =
-              Candidate.Period + Candidate.Constraint;
-          Rewritten += "\n__cs_timer_counter[" +
-                       std::to_string(Candidate.Index) + "]++;";
-          Rewritten += "\nif (__cs_timer_counter[" +
-                       std::to_string(Candidate.Index) + "] >= " +
-                       std::to_string(TriggerPeriod) + ") {";
-          Rewritten += "\n  __cs_timer_counter[" +
-                       std::to_string(Candidate.Index) + "] = 0;";
-          Rewritten += "\n  __cs_active_thread[" +
-                       std::to_string(Candidate.Index) + "] = 1;";
-          Rewritten += "\n  __cs_pc[" + std::to_string(Candidate.Index) +
-                       "] = 0;";
-          Rewritten += "\n  __cs_pc_cs[" +
-                       std::to_string(Candidate.Index) + "] = 0;";
-          Rewritten += "\n  __cs_threadargs[" +
-                       std::to_string(Candidate.Index) + "] = 0;";
-          Rewritten += "\n  __cs_pc_cs[" + std::to_string(Plan.Index) +
-                       "] = " + std::to_string(StatementIndex + 1) +
-                       "; return;\n}";
-        }
+        Rewritten += buildDeferredTimerActivation(Plan, Plans, StatementIndex);
       }
-      if (TriggeredEvent)
-        Rewritten += "\n__cs_pc_cs[" + std::to_string(Plan.Index) + "] = " +
-                     std::to_string(StatementIndex + 1) + "; return;";
     }
 
     if (Rewritten.empty())
@@ -1402,7 +1489,7 @@ llvm::Error LazySequentializationPass::run(const PipelineContext &Context,
             .str());
   if (Result.Summary.Kind == ProgramKind::InterruptDriven) {
     Result.Notes.push_back(
-        "phase5: native lazyseq 已迁移随机 ISR priority、event 触发和 timer 周期激活；多实例与完整时间约束尚未迁移");
+        "phase5: native lazyseq 已迁移随机 ISR priority、event 触发、timer 周期激活及 timer 多实例；完整时间约束尚待收敛");
   }
   return Error::success();
 }
