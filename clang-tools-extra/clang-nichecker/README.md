@@ -818,6 +818,21 @@ grep -n -E 'interrupt_(low|high)_0|__cs_pc\[[23]\] != 0' \
 
 该回归 JSON 将源注释中的优先级反转，预期 `interrupt_low_0` 而非 `interrupt_high_0` 带有仅首次启动的 PC 条件，证明 lazyseq 使用了原生配置而非注释默认值。
 
+如果 JSON 声明的函数不匹配 `ISR_`、`isr_` 或 `interrupt` 命名约定，配置本身仍会将程序分类为 interrupt-driven：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker \
+  --pipeline-profile=lazy \
+  --isr-config=clang-tools-extra/clang-nichecker/test/lazy-configured-handler.json \
+  --rounds=1 -print-analysis -output=/tmp/lazy-configured-handler.c \
+  clang-tools-extra/clang-nichecker/test/lazy-configured-handler-input.c -- -w
+grep -n -E 'void \*deferred_handler_0|__CS_PTHREAD_CREATE.*deferred_handler_0' \
+  /tmp/lazy-configured-handler.c
+```
+
+预期分析输出为 `kind: interrupt-driven`，产物包含 `deferred_handler_0`，而不是把该输入当作顺序程序跳过 lazyseq。
+
 ### event 触发回归
 
 ```bash

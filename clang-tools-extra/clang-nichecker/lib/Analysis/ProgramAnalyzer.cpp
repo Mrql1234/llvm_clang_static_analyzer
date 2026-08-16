@@ -141,6 +141,7 @@ llvm::Error applyInterruptConfig(ProgramSummary &Summary,
                                    "ISR 配置必须是 JSON 对象: %s",
                                    ConfigPath.str().c_str());
 
+  bool HasConfiguredInterrupt = false;
   for (const auto &Entry : *Root) {
     const llvm::json::Object *Object = Entry.second.getAsObject();
     if (!Object)
@@ -184,7 +185,10 @@ llvm::Error applyInterruptConfig(ProgramSummary &Summary,
                                        Entry.first.str().c_str());
       Info->Constraint = static_cast<unsigned>(*Constraint);
     }
+    HasConfiguredInterrupt = true;
   }
+  if (HasConfiguredInterrupt)
+    Summary.Kind = ProgramKind::InterruptDriven;
   return llvm::Error::success();
 }
 
