@@ -21,6 +21,15 @@ enum class ProgramKind {
   InterruptDriven,
 };
 
+struct InterruptInfo {
+  std::string Name;
+  std::string Kind = "random";
+  unsigned Priority = 0;
+  unsigned Period = 0;
+  std::string Event;
+  unsigned Constraint = 0;
+};
+
 struct ProgramSummary {
   ProgramKind Kind = ProgramKind::Sequential;
   bool UsesPthreadCreate = false;
@@ -28,6 +37,7 @@ struct ProgramSummary {
   bool UsesDisableISR = false;
   const FunctionDecl *MainFunction = nullptr;
   std::vector<std::string> InterruptFunctions;
+  std::vector<InterruptInfo> InterruptInfos;
   std::vector<std::string> ThreadEntryFunctions;
 };
 

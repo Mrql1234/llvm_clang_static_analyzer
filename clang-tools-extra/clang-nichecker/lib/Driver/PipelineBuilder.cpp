@@ -166,7 +166,7 @@ std::vector<std::string> defaultPipelineNames(const PipelineOptions &Options) {
 
 std::vector<std::string> lazyProfileNames(const PipelineOptions &Options) {
   std::vector<std::string> Names = {
-      "program-classifier", "workarounds",     "functiontracker",
+      "program-classifier", "interrupt-lowering", "workarounds",     "functiontracker",
       "preinstrumenter",    "spinlock",        "preinliner",
       "inliner",            "slice",           "switchtransformer",
       "dowhileconverter",   "LoopAbstraction", "conditionextractor",

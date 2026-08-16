@@ -41,7 +41,8 @@ std::string joinNotes(const std::vector<std::string> &Notes) {
 }
 
 bool startsWithISR(StringRef Name) {
-  return Name.starts_with("ISR_") || Name.starts_with("isr_") ||
+  return Name.starts_with("interrupt") || Name.starts_with("ISR_") ||
+         Name.starts_with("isr_") ||
          Name.starts_with("CAN_ISR") || Name.starts_with("TIMER_ISR");
 }
 

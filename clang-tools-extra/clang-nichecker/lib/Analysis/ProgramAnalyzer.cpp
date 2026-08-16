@@ -1,6 +1,9 @@
 #include "clang-nichecker/Analysis/ProgramAnalyzer.h"
 #include "clang-nichecker/Support/SourceUtils.h"
 
+#include <cctype>
+#include <cstring>
+
 using namespace clang;
 
 namespace clang::nichecker {
@@ -22,6 +25,40 @@ static const FunctionDecl *findMainFunction(ASTContext &Context) {
   return nullptr;
 }
 
+static unsigned readPriorityComment(const FunctionDecl *FD,
+                                    const SourceManager &SM) {
+  SourceLocation Location = SM.getSpellingLoc(FD->getBeginLoc());
+  if (!Location.isValid() || SM.getFileID(Location) != SM.getMainFileID())
+    return 0;
+
+  StringRef Source = SM.getBufferData(SM.getMainFileID());
+  unsigned Offset = SM.getFileOffset(Location);
+  if (Offset > Source.size())
+    return 0;
+  size_t CurrentLine = Source.rfind('\n', Offset);
+  if (CurrentLine == StringRef::npos || CurrentLine == 0)
+    return 0;
+  size_t PreviousEnd = CurrentLine;
+  size_t PreviousBegin = Source.rfind('\n', PreviousEnd - 1);
+  PreviousBegin =
+      PreviousBegin == StringRef::npos ? 0 : static_cast<size_t>(PreviousBegin + 1);
+  StringRef PreviousLine = Source.slice(PreviousBegin, PreviousEnd).trim();
+  size_t PriorityStart = PreviousLine.find("priority");
+  if (PriorityStart == StringRef::npos)
+    return 0;
+
+  StringRef Value = PreviousLine.substr(PriorityStart + strlen("priority")).trim();
+  if (Value.empty())
+    return 0;
+  size_t NumberStart = 0;
+  while (NumberStart < Value.size() &&
+         !std::isdigit(static_cast<unsigned char>(Value[NumberStart])))
+    ++NumberStart;
+  Value = Value.substr(NumberStart);
+  unsigned Priority = 0;
+  return Value.getAsInteger(10, Priority) ? 0 : Priority;
+}
+
 ProgramAnalyzer::ProgramAnalyzer(ASTContext &Context)
     : Context(Context), SM(Context.getSourceManager()) {}
 
@@ -33,8 +70,11 @@ bool ProgramAnalyzer::VisitFunctionDecl(FunctionDecl *FD) {
     return true;
 
   llvm::StringRef Name = FD->getName();
-  if (startsWithISR(Name) && !containsName(Summary.InterruptFunctions, Name))
+  if (startsWithISR(Name) && !containsName(Summary.InterruptFunctions, Name)) {
     Summary.InterruptFunctions.push_back(Name.str());
+    Summary.InterruptInfos.push_back(
+        InterruptInfo{Name.str(), "random", readPriorityComment(FD, SM)});
+  }
   return true;
 }
 

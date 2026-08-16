@@ -11,6 +11,7 @@
 
 #include <optional>
 #include <algorithm>
+#include <cctype>
 #include <string>
 #include <vector>
 
@@ -27,11 +28,76 @@ struct ThreadPlan {
   unsigned Index = 0;
   unsigned StatementCount = 0;
   bool IsMainThread = false;
+  bool IsInterrupt = false;
+  unsigned Priority = 0;
 };
 
 bool isLazySeqRequested(const PipelineOptions &Options) {
   return Options.PipelineProfile == "lazy" ||
          StringRef(Options.PipelineSpec).contains("lazyseq");
+}
+
+const InterruptInfo *findInterruptInfo(StringRef Name,
+                                       const ProgramSummary &Summary) {
+  for (const InterruptInfo &Info : Summary.InterruptInfos)
+    if (Name == Info.Name || Name.starts_with(Info.Name + "_"))
+      return &Info;
+  return nullptr;
+}
+
+std::string buildPythonInputGate(const ThreadPlan &Plan,
+                                 const std::vector<ThreadPlan> &Plans,
+                                 bool IsMultiThreaded,
+                                 bool SkipMainTaskGate = false) {
+  if (Plan.IsMainThread)
+    return "";
+  if (SkipMainTaskGate && Plan.Name == "main_task_0")
+    return "";
+
+  unsigned HighestPriority = 0;
+  for (const ThreadPlan &Candidate : Plans)
+    if (!Candidate.IsMainThread)
+      HighestPriority = std::max(HighestPriority, Candidate.Priority);
+
+  std::string Gate;
+  raw_string_ostream OS(Gate);
+  bool First = true;
+  auto appendCompletion = [&](const ThreadPlan &Candidate) {
+    if (!First)
+      OS << " && ";
+    First = false;
+    OS << "(__cs_pc[" << Candidate.Index << "] == 0 || __cs_pc["
+       << Candidate.Index << "] == " << Candidate.StatementCount << ")";
+  };
+
+  for (const ThreadPlan &Candidate : Plans) {
+    if (Candidate.Index == Plan.Index)
+      continue;
+    if (IsMultiThreaded) {
+      if (Candidate.Priority >= Plan.Priority)
+        appendCompletion(Candidate);
+      continue;
+    }
+
+    // Python lazyseq lets highest-priority random interrupts preempt freely.
+    // Lower-priority random interrupts only wait for non-highest candidates.
+    if (Plan.Priority != HighestPriority &&
+        Candidate.Priority >= Plan.Priority &&
+        Candidate.Priority != HighestPriority)
+      appendCompletion(Candidate);
+  }
+  return OS.str();
+}
+
+bool isHighestPriorityInterrupt(const ThreadPlan &Plan,
+                                const std::vector<ThreadPlan> &Plans,
+                                bool IsMultiThreaded) {
+  if (IsMultiThreaded || !Plan.IsInterrupt)
+    return false;
+  for (const ThreadPlan &Candidate : Plans)
+    if (Candidate.IsInterrupt && Candidate.Priority > Plan.Priority)
+      return false;
+  return true;
 }
 
 std::optional<std::string> sourceText(const Stmt *Node,
@@ -132,7 +198,11 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans,
   const unsigned LockSlots = Plans.size() + 1;
   OS << "/* Native lazyseq runtime state. instrumenter adds CBMC bitwidths later. */\n";
   OS << "extern void __VERIFIER_assume(int);\n";
+  OS << "extern void __VERIFIER_error(void);\n";
+  OS << "#ifndef NULL\n#define NULL 0\n#endif\n";
+  OS << "#ifndef assert\n#define assert(Condition) \\\n  do { if (!(Condition)) __VERIFIER_error(); } while (0)\n#endif\n";
   OS << "static unsigned __cs_active_thread[" << Plans.size() << "] = {1};\n";
+  OS << "static unsigned __cs_disable_thread[" << Plans.size() << "] = {0};\n";
   OS << "static unsigned __cs_pc[" << Plans.size() << "] = {0};\n";
   OS << "static unsigned __cs_pc_cs[" << Plans.size() << "] = {0};\n";
   OS << "static unsigned __cs_thread_index = 0;\n";
@@ -302,7 +372,8 @@ buildRoundSelections(StringRef Schedule, unsigned Rounds, unsigned ThreadCount) 
 }
 
 std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
-                           const std::vector<std::vector<bool>> &Selections) {
+                           const std::vector<std::vector<bool>> &Selections,
+                           bool IsMultiThreaded) {
   std::string Scheduler;
   raw_string_ostream OS(Scheduler);
   const unsigned Rounds = static_cast<unsigned>(Selections.size());
@@ -315,11 +386,21 @@ std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
         continue;
       const std::string Temp =
           formatv("__cs_tmp_t{0}_r{1}", Plan.Index, Round).str();
+      const std::string InputGate =
+          buildPythonInputGate(Plan, Plans, IsMultiThreaded, Round == 0);
+      const bool FirstActivationOnly =
+          isHighestPriorityInterrupt(Plan, Plans, IsMultiThreaded);
       OS << "  {\n";
       OS << "    unsigned " << Temp << ";\n";
-      if (!Plan.IsMainThread)
-        OS << "    if (!__cs_active_thread[" << Plan.Index << "])\n      goto "
-           << Temp << "_done;\n";
+      if (!Plan.IsMainThread) {
+        OS << "    if (!__cs_active_thread[" << Plan.Index
+           << "] || __cs_disable_thread[" << Plan.Index << "] == 1";
+        if (!InputGate.empty())
+          OS << " || !(" << InputGate << ")";
+        if (FirstActivationOnly)
+          OS << " || __cs_pc[" << Plan.Index << "] != 0";
+        OS << ")\n      goto " << Temp << "_done;\n";
+      }
       OS << "    __cs_thread_index = " << Plan.Index << ";\n";
       OS << "    __cs_pc_cs[" << Plan.Index << "] = " << Temp << ";\n";
       if (Round == 0 && Plan.IsMainThread)
@@ -351,7 +432,7 @@ std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
   OS << "  /* lazyseq final main context */\n";
   OS << "  {\n";
   OS << "    unsigned " << FinalMainTemp << ";\n";
-  OS << "    if (__cs_active_thread[0]) {\n";
+  OS << "    if (__cs_active_thread[0] && __cs_disable_thread[0] != 1) {\n";
   OS << "      __cs_thread_index = 0;\n";
   OS << "      __cs_pc_cs[0] = " << FinalMainTemp << ";\n";
   OS << "      __VERIFIER_assume(__cs_pc_cs[0] >= __cs_pc[0]);\n";
@@ -367,7 +448,7 @@ std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
 }
 
 std::string buildNoRoundRobinScheduler(const std::vector<ThreadPlan> &Plans,
-                                       unsigned Rounds) {
+                                       unsigned Rounds, bool IsMultiThreaded) {
   std::string Scheduler;
   raw_string_ostream OS(Scheduler);
   const ThreadPlan &MainPlan = Plans.front();
@@ -386,13 +467,23 @@ std::string buildNoRoundRobinScheduler(const std::vector<ThreadPlan> &Plans,
         formatv("__cs_tmp_t{0}_r{1}", Plan.Index, Round).str();
     const std::string Run =
         formatv("__cs_run_t{0}_r{1}", Plan.Index, Round).str();
+    const std::string InputGate =
+        buildPythonInputGate(Plan, Plans, IsMultiThreaded, IsFirstRound);
+    const bool FirstActivationOnly =
+        isHighestPriorityInterrupt(Plan, Plans, IsMultiThreaded);
     OS << "  {\n";
     if (!IsFirstRound)
       OS << "    __VERIFIER_assume(__cs_last_thread != " << Plan.Index
          << ");\n";
     OS << "    unsigned " << Temp << ";\n";
     OS << "    unsigned " << Run << " = (" << Temp
-       << " && (__cs_active_thread[" << Plan.Index << "] == 1));\n";
+       << " && (__cs_active_thread[" << Plan.Index << "] == 1)"
+       << " && (__cs_disable_thread[" << Plan.Index << "] != 1))";
+    if (!InputGate.empty())
+      OS << " && (" << InputGate << ")";
+    if (FirstActivationOnly)
+      OS << " && (__cs_pc[" << Plan.Index << "] == 0)";
+    OS << ";\n";
     OS << "    if (" << Run << ") {\n";
     OS << "      __cs_thread_index = " << Plan.Index << ";\n";
     if (IsFirstRound)
@@ -453,7 +544,7 @@ std::string buildNoRoundRobinScheduler(const std::vector<ThreadPlan> &Plans,
   const std::string FinalTemp = formatv("__cs_tmp_t0_r{0}", Rounds).str();
   OS << "  /* lazyseq no-round-robin final main context */\n";
   OS << "  {\n    unsigned " << FinalTemp << ";\n";
-  OS << "    if (__cs_active_thread[0] == 1) {\n";
+  OS << "    if (__cs_active_thread[0] == 1 && __cs_disable_thread[0] != 1) {\n";
   OS << "      __cs_thread_index = 0;\n";
   OS << "      __cs_pc_cs[0] = __cs_pc[0] + " << FinalTemp << ";\n";
   OS << "      __VERIFIER_assume(__cs_pc_cs[0] >= __cs_pc[0]);\n";
@@ -466,7 +557,8 @@ std::string buildNoRoundRobinScheduler(const std::vector<ThreadPlan> &Plans,
 }
 
 std::string buildContextBoundedScheduler(const std::vector<ThreadPlan> &Plans,
-                                         unsigned Contexts) {
+                                         unsigned Contexts,
+                                         bool IsMultiThreaded) {
   std::string Scheduler;
   raw_string_ostream OS(Scheduler);
   const ThreadPlan &MainPlan = Plans.front();
@@ -481,9 +573,20 @@ std::string buildContextBoundedScheduler(const std::vector<ThreadPlan> &Plans,
   };
   auto emitContextCall = [&](const ThreadPlan &Plan, unsigned Context,
                              StringRef Indent) {
+    const std::string InputGate =
+        buildPythonInputGate(Plan, Plans, IsMultiThreaded);
+    const bool FirstActivationOnly =
+        isHighestPriorityInterrupt(Plan, Plans, IsMultiThreaded);
     OS << Indent << "__cs_thread_index = " << Plan.Index << ";\n";
     OS << Indent << "__VERIFIER_assume(__cs_active_thread[" << Plan.Index
        << "]);\n";
+    OS << Indent << "__VERIFIER_assume(__cs_disable_thread[" << Plan.Index
+       << "] != 1);\n";
+    if (!InputGate.empty())
+      OS << Indent << "__VERIFIER_assume(" << InputGate << ");\n";
+    if (FirstActivationOnly)
+      OS << Indent << "__VERIFIER_assume(__cs_pc[" << Plan.Index
+         << "] == 0);\n";
     OS << Indent << "__VERIFIER_assume(__cs_cs[" << Context
        << "] >= __cs_pc_cs[" << Plan.Index << "]);\n";
     OS << Indent << "__VERIFIER_assume(__cs_cs[" << Context << "] <= "
@@ -586,8 +689,10 @@ public:
       // de-duplication fallback when lazyseq is invoked without that pass.
       if (!SeenEntries.insert(Name).second)
         continue;
+      const InterruptInfo *Info = findInterruptInfo(Name, Summary);
       Plans.push_back(ThreadPlan{Definition, Name,
-                                 static_cast<unsigned>(Plans.size()), 0, false});
+                                 static_cast<unsigned>(Plans.size()), 0, false,
+                                 Info != nullptr, Info ? Info->Priority : 0});
     }
     if (Plans.size() == 1) {
       return createStringError(inconvertibleErrorCode(),
@@ -632,10 +737,53 @@ std::string rewriteJoinCall(const CallExpr *Call, const PipelineContext &Context
 }
 
 std::optional<std::string>
+rewriteISRMaskCall(const CallExpr *Call, StringRef CalleeName,
+                   const StringMap<unsigned> &ThreadIndices,
+                   unsigned CurrentThreadIndex, const PipelineContext &Context) {
+  if (Call->getNumArgs() != 1)
+    return std::nullopt;
+  std::optional<std::string> Argument = sourceText(Call->getArg(0), Context);
+  if (!Argument)
+    return std::nullopt;
+  std::string CompactArgument;
+  for (char Character : *Argument)
+    if (!std::isspace(static_cast<unsigned char>(Character)))
+      CompactArgument += Character;
+  if (CompactArgument.empty())
+    return std::nullopt;
+  const bool AllThreads = CompactArgument == "-1";
+  const unsigned Value = CalleeName == "disable_isr" ? 1 : 0;
+  std::string Replacement;
+  raw_string_ostream OS(Replacement);
+  bool Matched = false;
+  for (const auto &Entry : ThreadIndices) {
+    StringRef Name = Entry.getKey();
+    const unsigned Index = Entry.getValue();
+    if ((AllThreads && Index != CurrentThreadIndex) ||
+        (!AllThreads && Name.size() >= 3 &&
+         Name[Name.size() - 3] == CompactArgument.front())) {
+      OS << "__cs_disable_thread[" << Index << "] = " << Value << "; ";
+      Matched = true;
+    }
+  }
+  // Python also updates main_thread for disable_isr(-1), including when it
+  // is the caller itself.
+  if (AllThreads) {
+    OS << "__cs_disable_thread[0] = " << Value << ";";
+    Matched = true;
+  }
+  return Matched ? std::optional<std::string>(OS.str()) : std::nullopt;
+}
+
+std::optional<std::string>
 rewriteNestedRuntimeCall(const CallExpr *Call,
                          const StringMap<unsigned> &ThreadIndices,
+                         unsigned CurrentThreadIndex,
                          const PipelineContext &Context) {
   const std::string CalleeName = getCalleeName(Call, Context);
+  if (CalleeName == "disable_isr" || CalleeName == "enable_isr")
+    return rewriteISRMaskCall(Call, CalleeName, ThreadIndices,
+                              CurrentThreadIndex, Context);
   if (CalleeName == "pthread_create") {
     const FunctionDecl *Entry = functionFromThreadStartArgument(Call);
     auto It = Entry ? ThreadIndices.find(Entry->getName())
@@ -788,12 +936,14 @@ class NestedRuntimeCallCollector
     : public RecursiveASTVisitor<NestedRuntimeCallCollector> {
 public:
   NestedRuntimeCallCollector(const PipelineContext &Context, unsigned BaseOffset,
-                             const StringMap<unsigned> &ThreadIndices)
-      : Context(Context), BaseOffset(BaseOffset), ThreadIndices(ThreadIndices) {}
+                             const StringMap<unsigned> &ThreadIndices,
+                             unsigned CurrentThreadIndex)
+      : Context(Context), BaseOffset(BaseOffset), ThreadIndices(ThreadIndices),
+        CurrentThreadIndex(CurrentThreadIndex) {}
 
   bool VisitCallExpr(CallExpr *Call) {
     std::optional<std::string> Replacement =
-        rewriteNestedRuntimeCall(Call, ThreadIndices, Context);
+        rewriteNestedRuntimeCall(Call, ThreadIndices, CurrentThreadIndex, Context);
     if (!Replacement)
       return true;
     std::optional<unsigned> Offset =
@@ -815,12 +965,14 @@ private:
   const PipelineContext &Context;
   unsigned BaseOffset;
   const StringMap<unsigned> &ThreadIndices;
+  unsigned CurrentThreadIndex;
   std::vector<TextReplacement> Replacements;
 };
 
 std::string rewriteNestedLazyContent(const Stmt *Statement, StringRef Original,
                                      bool RewriteThreadReturns,
                                      const StringMap<unsigned> &ThreadIndices,
+                                     unsigned CurrentThreadIndex,
                                      const PipelineContext &Context) {
   std::optional<unsigned> BaseOffset =
       getFileOffset(Statement->getBeginLoc(), Context.getSourceManager());
@@ -834,7 +986,7 @@ std::string rewriteNestedLazyContent(const Stmt *Statement, StringRef Original,
     Replacements = ExitCollector.takeReplacements();
   }
   NestedRuntimeCallCollector RuntimeCollector(Context, *BaseOffset,
-                                              ThreadIndices);
+                                              ThreadIndices, CurrentThreadIndex);
   RuntimeCollector.TraverseStmt(const_cast<Stmt *>(Statement));
   std::vector<TextReplacement> RuntimeReplacements =
       RuntimeCollector.takeReplacements();
@@ -876,7 +1028,7 @@ std::string rewriteFunctionBody(
 
     std::string Rewritten = rewriteNestedLazyContent(
         Statement, ensureStatementTerminator(*Text, Statement),
-        !Plan.IsMainThread, ThreadIndices, Context);
+        !Plan.IsMainThread, ThreadIndices, Plan.Index, Context);
     if (!Plan.IsMainThread) {
       if (const auto *Return = dyn_cast<ReturnStmt>(Statement)) {
         Rewritten = "__cs_pthread_exit();";
@@ -1070,11 +1222,17 @@ llvm::Error LazySequentializationPass::run(const PipelineContext &Context,
   Result.Source =
       buildRuntimePrelude(Plans, Context.Options.NondetCondvarWakeups) + Source +
                   (Context.Options.NoRoundRobin
-                       ? buildNoRoundRobinScheduler(Plans, EffectiveRounds)
+                       ? buildNoRoundRobinScheduler(
+                             Plans, EffectiveRounds,
+                             Result.Summary.Kind == ProgramKind::MultiThreaded)
                        : Context.Options.Contexts
                              ? buildContextBoundedScheduler(Plans,
-                                                            Context.Options.Contexts)
-                             : buildScheduler(Plans, *Selections));
+                                                            Context.Options.Contexts,
+                                                            Result.Summary.Kind ==
+                                                                ProgramKind::MultiThreaded)
+                             : buildScheduler(
+                                   Plans, *Selections,
+                                   Result.Summary.Kind == ProgramKind::MultiThreaded));
   Result.PendingReplacements.clear();
   Result.Notes.push_back(
       formatv("phase5: native lazyseq 重写了 {0} 个线程函数并生成 {1} 轮调度器",
@@ -1089,7 +1247,7 @@ llvm::Error LazySequentializationPass::run(const PipelineContext &Context,
             .str());
   if (Result.Summary.Kind == ProgramKind::InterruptDriven) {
     Result.Notes.push_back(
-        "phase5: 当前 native lazyseq 仅调度 pthread_create 入口；ISR 优先级与约束尚未迁移");
+        "phase5: native lazyseq 已迁移随机 ISR 的 priority 注释和完成状态门控；event/timer 约束尚未迁移");
   }
   return Error::success();
 }

@@ -765,3 +765,36 @@ build-clang/bin/clang -fsyntax-only /tmp/lazy-constants-native.c
 ```
 
 预期产物包含 `int first = 10;`、`int second = 4;` 和未折叠的 `int third = 7 / 2;`。
+
+## 2026-08：中断入口与随机优先级
+
+入口文件：
+
+1. `clang-tools-extra/clang-nichecker/lib/Passes/InterruptLoweringPass.cpp`：将原始 `main` 和 ISR 定义降级为 pthread 入口，并从当前 AST 的 `pthread_create` 原型推导线程句柄类型；没有原型的旧样例保持 `unsigned` 回退。
+2. `clang-tools-extra/clang-nichecker/lib/Analysis/ProgramAnalyzer.cpp`：读取紧邻 ISR 定义的 `// priority N` 注释，稳定保存为 `ProgramSummary.InterruptInfos`，不受后续重解析和 duplicator 重命名影响。
+3. `clang-tools-extra/clang-nichecker/lib/Passes/LazySequentializationPass.cpp`：迁移 Python `lazyseq.getInputList()` 的随机优先级完成状态门控。
+4. `clang-tools-extra/clang-nichecker/test/lazy-interrupt-priority-input.c`：随机优先级 ISR 回归输入。
+5. `clang-tools-extra/clang-nichecker/test/lazy-interrupt-mask-input.c`：ISR 屏蔽和恢复回归输入。
+
+运行命令：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker \
+  --pipeline-profile=lazy --rounds=1 -print-analysis \
+  -output=/tmp/lazy-interrupt-priority.c \
+  clang-tools-extra/clang-nichecker/test/lazy-interrupt-priority-input.c -- -w
+grep -n -E 'interrupt_(low|high)_0|__cs_active_thread\[[12]\]' \
+  /tmp/lazy-interrupt-priority.c
+
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,interrupt-lowering,duplicator,lazyseq,instrumenter \
+  --rounds=1 -output=/tmp/lazy-interrupt-mask.c \
+  clang-tools-extra/clang-nichecker/test/lazy-interrupt-mask-input.c -- -w
+grep -n '__cs_disable_thread' /tmp/lazy-interrupt-mask.c
+```
+
+预期 `interrupt_high_0` 仅在自身 PC 为 0 时启动，且没有优先级等待条件；首轮的 `main_task_0` 不应用完成门控。第二个回归产物应包含 `__cs_disable_thread` 数组、屏蔽/恢复赋值以及每个 scheduler 分支上的屏蔽检查。此行为对应旧 Python 随机 ISR 分支：最高优先级 ISR 可立即抢占，低优先级随机 ISR 只受非最高优先级候选的完成状态约束。当前仍未迁移 GUI `dictfile` 中的 `event`、`timer`、周期和时间约束字段。
+
+Python/C++ 分段对比继续使用本 README 前文的 `lazy_until_replacegoto` 命令：Python 的模块产物位于 `nichecker/Cseq/log/*_output__<模块>.c`，C++ 通过 `--pipeline=<截至模块>` 和 `-output=/tmp/<模块>.c` 输出对应阶段源码。对 ISR 优先级输入，应首先比较 `lazyseq` 后调度器中每个 `__cs_active_thread` 分支的 PC 完成门控。
