@@ -1027,6 +1027,23 @@ grep -n -E '__cs_svp_wwr_(write|read|last|seen)|assert\(__cs_svp_wwr_read' \
 
 该标量 wwr 实现对应 Python 在写入后保存 `wwr_w_tmp*`、在后续读取时比较保存值的规则。`wrw` 及数组/指针仍未完成。
 
+### wrw 优先级访问序
+
+入口文件仍为 `clang-tools-extra/clang-nichecker/lib/Passes/InstrumenterPass.cpp`。`wrw` 使用 lazyseq 线程函数的 `__CS_LAZY_IF` 索引和 `ProgramSummary.InterruptInfos` 中稳定保存的优先级：非主任务的读取会标记所有严格低优先级线程；非最高优先级线程写入后按写入次数检查自己的标记为零，再清空标记。该逻辑对应 Python 的 `wrw_a_*` 与 `wrw_a_*_num` 状态。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,interrupt-lowering,duplicator,lazyseq,instrumenter \
+  --svp-config=clang-tools-extra/clang-nichecker/test/lazy-svp-wrw-config.json \
+  --rounds=1 -output=/tmp/lazy-svp-wrw.c \
+  clang-tools-extra/clang-nichecker/test/lazy-svp-wrw-input.c -- -w
+grep -n -E '__cs_svp_wrw_(mark|writes)|assert\(__cs_svp_wrw_mark' \
+  /tmp/lazy-svp-wrw.c
+```
+
+预期高优先级 ISR 的读取写入 `mark[低优先级线程索引]`，低优先级 ISR 的第二次写入前包含 `assert(mark[...] == 0)`。数组下标、指针别名和复杂表达式仍未覆盖。
+
 ### 随机 ISR 时间约束回归
 
 ```bash

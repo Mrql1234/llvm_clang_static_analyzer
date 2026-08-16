@@ -286,15 +286,22 @@ public:
 
   std::vector<unsigned> readEnds() const {
     std::set<unsigned> Ends;
+    for (const Access &Read : filteredReads())
+      Ends.insert(Read.End);
+    return std::vector<unsigned>(Ends.begin(), Ends.end());
+  }
+
+  std::vector<Access> filteredReads() const {
+    std::vector<Access> Reads;
     for (const Access &Read : ReadCandidates) {
       const bool IsWriteLValue = std::any_of(
           WriteRanges.begin(), WriteRanges.end(), [&](const Access &Range) {
             return Read.Begin >= Range.Begin && Read.Begin < Range.End;
           });
       if (!IsWriteLValue && WriteEnds.find(Read.End) == WriteEnds.end())
-        Ends.insert(Read.End);
+        Reads.push_back(Read);
     }
-    return std::vector<unsigned>(Ends.begin(), Ends.end());
+    return Reads;
   }
 
   const std::set<unsigned> &writeEnds() const { return WriteEnds; }
@@ -305,7 +312,6 @@ public:
     return std::vector<unsigned>(Begins.begin(), Begins.end());
   }
   StringRef type() const { return Type; }
-  const std::vector<Access> &reads() const { return ReadCandidates; }
   const std::vector<Access> &writes() const { return WriteRanges; }
   const std::map<std::string, unsigned> &functionIndices() const {
     return FunctionIndices;
@@ -496,6 +502,78 @@ RwrInstrumentation instrumentWwrScalar(const PipelineContext &Context,
   return Result;
 }
 
+int priorityForSvpFunction(StringRef Name, const ProgramSummary &Summary) {
+  if (Name == "main_task_0" || Name == "main_thread")
+    return -1;
+  for (const InterruptInfo &Info : Summary.InterruptInfos)
+    if (Name == Info.Name || Name.starts_with(Info.Name + "_"))
+      return static_cast<int>(Info.Priority);
+  return 0;
+}
+
+RwrInstrumentation instrumentWrwScalar(const PipelineContext &Context,
+                                        const ProgramSummary &Summary,
+                                        std::string &Source,
+                                        unsigned ThreadCount) {
+  RwrInstrumentation Result;
+  const StringRef Variable = Context.Options.SvpVariable;
+  if (!isIdentifier(Variable) ||
+      StringRef(Source).contains("__CS_SVP_WRW_INSTRUMENTED"))
+    return Result;
+
+  RwrAccessCollector Collector(Context, Source, Variable);
+  Collector.TraverseDecl(Context.getASTContext().getTranslationUnitDecl());
+  const auto &Indices = Collector.functionIndices();
+  if (Indices.empty())
+    return Result;
+
+  int HighestPriority = -1;
+  for (const auto &[Name, Index] : Indices)
+    HighestPriority = std::max(HighestPriority, priorityForSvpFunction(Name, Summary));
+
+  std::map<unsigned, std::string> Insertions;
+  for (const RwrAccessCollector::Access &Read : Collector.filteredReads()) {
+    auto Current = Indices.find(Read.Function);
+    if (Current == Indices.end() || Read.Function == "main_task_0")
+      continue;
+    const int Priority = priorityForSvpFunction(Read.Function, Summary);
+    for (const auto &[OtherName, OtherIndex] : Indices) {
+      if (OtherName != "main_thread" &&
+          priorityForSvpFunction(OtherName, Summary) < Priority)
+        Insertions[Read.End] += "\n  __cs_svp_wrw_mark[" +
+                                std::to_string(OtherIndex) + "] = 1;\n";
+    }
+    ++Result.Reads;
+  }
+  for (const RwrAccessCollector::Access &Write : Collector.writes()) {
+    auto Current = Indices.find(Write.Function);
+    if (Current == Indices.end() ||
+        priorityForSvpFunction(Write.Function, Summary) == HighestPriority)
+      continue;
+    const unsigned End = statementEndOffset(Source, Write.End);
+    if (End == 0)
+      continue;
+    Insertions[End] += "\n  if (__cs_svp_wrw_writes[" +
+                       std::to_string(Current->second) + "] != 0)\n"
+                       "    assert(__cs_svp_wrw_mark[" +
+                       std::to_string(Current->second) + "] == 0);\n"
+                       "  __cs_svp_wrw_writes[" +
+                       std::to_string(Current->second) + "]++;\n"
+                       "  __cs_svp_wrw_mark[" +
+                       std::to_string(Current->second) + "] = 0;\n";
+    ++Result.Writes;
+  }
+  if (Result.Reads == 0 && Result.Writes == 0)
+    return Result;
+  for (auto It = Insertions.rbegin(); It != Insertions.rend(); ++It)
+    Source.insert(It->first, It->second);
+  Source = "#define __CS_SVP_WRW_INSTRUMENTED 1\nunsigned "
+           "__cs_svp_wrw_mark[" + std::to_string(ThreadCount) +
+           "];\nunsigned __cs_svp_wrw_writes[" +
+           std::to_string(ThreadCount) + "];\n\n" + Source;
+  return Result;
+}
+
 } // namespace
 
 llvm::StringRef InstrumenterPass::name() const { return "instrumenter"; }
@@ -527,6 +605,9 @@ llvm::Error InstrumenterPass::run(const PipelineContext &Context,
                               static_cast<unsigned>(ThreadSizes.size()));
   if (Context.Options.SvpMode == "wwr")
     Svp = instrumentWwrScalar(Context, Source,
+                              static_cast<unsigned>(ThreadSizes.size()));
+  if (Context.Options.SvpMode == "wrw")
+    Svp = instrumentWrwScalar(Context, Result.Summary, Source,
                               static_cast<unsigned>(ThreadSizes.size()));
   Source = materializeRawLines(Source);
 
@@ -594,6 +675,12 @@ llvm::Error InstrumenterPass::run(const PipelineContext &Context,
     else
       Result.Notes.push_back(
           "phase6: wwr 当前仅支持命名标量全局变量的直接读写；未发现可插桩访问");
+  }
+  if (Context.Options.SvpMode == "wrw") {
+    Result.Notes.push_back(
+        formatv("phase6: instrumenter 已插入 wrw 优先级监控（变量 {0}，读 {1} 处，写 {2} 处）",
+                Context.Options.SvpVariable, Svp.Reads, Svp.Writes)
+            .str());
   }
   return Error::success();
 }
