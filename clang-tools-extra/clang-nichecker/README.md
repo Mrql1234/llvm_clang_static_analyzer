@@ -62,8 +62,8 @@
 
 这些桥接统一由 `lib/Support/LegacyJarRunner.cpp` 负责：
 
-1. 只查找当前系统 `PATH` 里的 `java`。
-2. 不再调用 Windows `java.exe`。
+1. 优先使用 `JAVA_HOME/bin/java`，其次在 `~/.local/java` 和 `/usr/lib/jvm` 查找 Linux JDK 11，最后才回退到当前 `PATH` 的 `java`。
+2. WSL 中会避开 Windows `java.exe` 符号链接，避免它不能读取 `/tmp` 和工作区的 Linux 绝对路径。
 3. 输入源码和 `data.json` 会先写入临时目录，再调用 `java -jar ...`。
 4. 当前 `slice` 使用旧协议入口名 `main_task`。
 5. 当前 `label-insertion` 使用旧协议入口名 `main_task_0`。
@@ -930,6 +930,26 @@ grep -n -E '__CS_CBMC_EXTRA_DECLS|nondet_int\(\)|__VERIFIER_(assume|nondet)|__CP
 ```
 
 预期产物包含 `__CS_CBMC_EXTRA_DECLS` 和 `nondet_int()`，不包含输入源码中的 `__VERIFIER_assume` 或 `__VERIFIER_nondet_int` 调用；`__CPROVER_assume` 保留为 CBMC 后端原语。
+
+## 2026-08：modefile 的原生 JSON 替代
+
+入口文件为 `clang-tools-extra/clang-nichecker/ClangNIChecker.cpp`，配置载体为 `PipelineOptions`（`clang-tools-extra/clang-nichecker/include/clang-nichecker/Support/Types.h`）。Python GUI/命令行原先以 pickle 写入 `nichecker/Cseq/modules/modefile`，字段为 `mode`、`type`、`globalVariable` 和 `isMt`。C++ 不读取该 pickle，改用 `--svp-config=<JSON>` 或显式 `--svp-mode`、`--svp-type`、`--svp-var`；显式参数优先于 JSON。
+
+JSON 的 `mode` 只接受 `rww`、`wwr`、`rwr`、`wrw`，选择任意模式时必须同时给出目标变量。配置中的 `mode` 与 `globalVariable` 会自动传给已保留的 `slice`/`label-insertion` jar 协议，除非另行使用 `--slice-mode` 或 `--slice-var` 覆盖。`type` 与完整单变量访问序插桩将由后续 native instrumenter 消费。
+
+回归配置为 `clang-tools-extra/clang-nichecker/test/lazy-svp-config.json`，其等价于旧 `modefile` 的 `rww/int/state` 配置：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,slice --pro-slice \
+  --svp-config=clang-tools-extra/clang-nichecker/test/lazy-svp-config.json \
+  -print-analysis -output=/tmp/lazy-svp-config.c \
+  clang-tools-extra/clang-nichecker/test/lazy-interrupt-priority-input.c -- -w
+```
+
+预期分析信息包含“`slice 已通过 legacy jar 生成输出`”。对应临时目录 `clang-nichecker-legacy-*/data.json` 中会有 `"mode": "rww"` 与 `"var": "state"`，证明 JSON 已进入原 jar 协议而未读取 Python pickle。
 
 ### 随机 ISR 时间约束回归
 

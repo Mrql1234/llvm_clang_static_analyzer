@@ -60,6 +60,9 @@ struct PipelineOptions {
   std::string Backend = "cbmc";
   std::string SliceVariable;
   std::string SliceMode;
+  std::string SvpMode;
+  std::string SvpType;
+  std::string SvpVariable;
   bool ReuseDimacs = false;
   bool EnableLegacySliceJar = false;
   bool EnableLegacyLabelJar = false;

@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <vector>
@@ -69,6 +70,41 @@ std::optional<std::string> locateLegacyCSeqDir() {
 }
 
 std::optional<std::string> locateJavaExecutable() {
+  auto executableAt = [](StringRef Root) -> std::optional<std::string> {
+    if (Root.empty())
+      return std::nullopt;
+    SmallString<256> Candidate(Root);
+    sys::path::append(Candidate, "bin", "java");
+    if (sys::fs::can_execute(Candidate))
+      return std::string(Candidate);
+    return std::nullopt;
+  };
+
+  // A Windows java.exe exposed through WSL cannot open the Linux absolute
+  // paths used for the temporary jar inputs. Prefer a configured Linux JDK 11
+  // before falling back to PATH, matching the Python launch environment.
+  if (const char *JavaHome = std::getenv("JAVA_HOME"))
+    if (std::optional<std::string> Java = executableAt(JavaHome))
+      return Java;
+
+  SmallString<256> Home;
+  if (sys::path::home_directory(Home)) {
+    SmallString<256> LocalJava(Home);
+    sys::path::append(LocalJava, ".local", "java");
+    std::error_code EC;
+    for (sys::fs::directory_iterator It(LocalJava, EC), End; !EC && It != End;
+         It.increment(EC)) {
+      StringRef Name = sys::path::filename(It->path());
+      if (!Name.contains("11"))
+        continue;
+      if (std::optional<std::string> Java = executableAt(It->path()))
+        return Java;
+    }
+  }
+
+  if (std::optional<std::string> Java =
+          executableAt("/usr/lib/jvm/java-11-openjdk-amd64"))
+    return Java;
   if (ErrorOr<std::string> Java = sys::findProgramByName("java"))
     return *Java;
   return std::nullopt;

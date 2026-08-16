@@ -12,6 +12,8 @@
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -105,6 +107,22 @@ static cl::opt<std::string>
     SliceModeOpt("slice-mode", cl::cat(ClangNICheckerCategory),
                  cl::desc("legacy jar 使用的 Python mode，例如 rww"));
 
+static cl::opt<std::string>
+    SvpConfigOpt("svp-config", cl::cat(ClangNICheckerCategory),
+                 cl::desc("单变量访问序 JSON 配置，替代 Python modefile"));
+
+static cl::opt<std::string>
+    SvpModeOpt("svp-mode", cl::cat(ClangNICheckerCategory),
+               cl::desc("单变量访问序模式：rww/wwr/rwr/wrw"));
+
+static cl::opt<std::string>
+    SvpTypeOpt("svp-type", cl::cat(ClangNICheckerCategory),
+               cl::desc("单变量访问序目标类型，例如 int 或 int *"));
+
+static cl::opt<std::string>
+    SvpVariableOpt("svp-var", cl::cat(ClangNICheckerCategory),
+                   cl::desc("单变量访问序目标，例如 counter 或 data[3]"));
+
 static cl::opt<bool>
     ReuseDimacsOpt("reuse-dimacs", cl::cat(ClangNICheckerCategory),
                    cl::desc("复用 mapper 已生成的 DIMACS 文件"));
@@ -117,7 +135,41 @@ static cl::opt<unsigned>
 static cl::opt<unsigned>
     UnwindForOpt("unwind-for", cl::cat(ClangNICheckerCategory),
                  cl::desc("for 循环展开上界，默认继承 --unwind"),
-                 cl::init(0));
+                   cl::init(0));
+
+struct SvpConfig {
+  std::string Mode;
+  std::string Type;
+  std::string Variable;
+};
+
+Expected<SvpConfig> loadSvpConfig(StringRef Path) {
+  auto Buffer = MemoryBuffer::getFile(Path);
+  if (!Buffer)
+    return errorCodeToError(Buffer.getError());
+  Expected<json::Value> Parsed = json::parse((*Buffer)->getBuffer());
+  if (!Parsed)
+    return Parsed.takeError();
+  const json::Object *Root = Parsed->getAsObject();
+  if (!Root)
+    return createStringError(inconvertibleErrorCode(),
+                             "SVP 配置必须是 JSON 对象: %s",
+                             Path.str().c_str());
+
+  SvpConfig Config;
+  if (auto Mode = Root->getString("mode"))
+    Config.Mode = Mode->str();
+  if (auto Type = Root->getString("type"))
+    Config.Type = Type->str();
+  if (auto Variable = Root->getString("globalVariable"))
+    Config.Variable = Variable->str();
+  return Config;
+}
+
+bool isValidSvpMode(StringRef Mode) {
+  return Mode.empty() || Mode == "rww" || Mode == "wwr" || Mode == "rwr" ||
+         Mode == "wrw";
+}
 
 } // namespace
 
@@ -160,6 +212,37 @@ int main(int argc, const char **argv) {
   Options.EnableLegacyLabelJar = EnableLegacyLabelJarOpt;
   Options.SliceVariable = SliceVariableOpt;
   Options.SliceMode = SliceModeOpt;
+  Options.SvpMode = SvpModeOpt;
+  Options.SvpType = SvpTypeOpt;
+  Options.SvpVariable = SvpVariableOpt;
+  if (!SvpConfigOpt.empty()) {
+    Expected<SvpConfig> Config = loadSvpConfig(SvpConfigOpt);
+    if (!Config) {
+      errs() << "[clang-nichecker] 无法读取 --svp-config: "
+             << toString(Config.takeError()) << "\n";
+      return 1;
+    }
+    if (Options.SvpMode.empty())
+      Options.SvpMode = Config->Mode;
+    if (Options.SvpType.empty())
+      Options.SvpType = Config->Type;
+    if (Options.SvpVariable.empty())
+      Options.SvpVariable = Config->Variable;
+  }
+  if (!isValidSvpMode(Options.SvpMode)) {
+    errs() << "[clang-nichecker] --svp-mode 只支持 rww/wwr/rwr/wrw\n";
+    return 1;
+  }
+  if (!Options.SvpMode.empty() && Options.SvpVariable.empty()) {
+    errs() << "[clang-nichecker] 使用 --svp-mode 时必须提供 --svp-var 或 --svp-config\n";
+    return 1;
+  }
+  // Python modefile also fed the slice jar. Keep a direct --slice-* argument
+  // authoritative while making the JSON replacement useful to that bridge.
+  if (Options.SliceMode.empty())
+    Options.SliceMode = Options.SvpMode;
+  if (Options.SliceVariable.empty())
+    Options.SliceVariable = Options.SvpVariable;
   Options.ReuseDimacs = ReuseDimacsOpt;
   Options.UnwindWhile = UnwindWhileOpt ? UnwindWhileOpt : UnwindOpt;
   Options.UnwindFor = UnwindForOpt ? UnwindForOpt : UnwindOpt;
