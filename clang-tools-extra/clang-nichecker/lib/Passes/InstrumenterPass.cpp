@@ -1,13 +1,20 @@
 #include "clang-nichecker/Passes/InstrumenterPass.h"
 #include "clang-nichecker/Support/LegacyJarRunner.h"
+#include "clang/AST/Decl.h"
+#include "clang/AST/Expr.h"
+#include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/Basic/SourceManager.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FormatVariadic.h"
 
 #include <algorithm>
 #include <cctype>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
+using namespace clang;
 using namespace llvm;
 
 namespace clang::nichecker {
@@ -166,6 +173,187 @@ extern unsigned char nondet_uchar(void);
 )";
 }
 
+bool isIdentifier(StringRef Value) {
+  if (Value.empty() ||
+      !(std::isalpha(static_cast<unsigned char>(Value.front())) ||
+        Value.front() == '_'))
+    return false;
+  return std::all_of(Value.begin() + 1, Value.end(), [](char C) {
+    return std::isalnum(static_cast<unsigned char>(C)) || C == '_';
+  });
+}
+
+unsigned sourceOffset(const SourceManager &SourceMgr, SourceLocation Location) {
+  return SourceMgr.getFileOffset(SourceMgr.getSpellingLoc(Location));
+}
+
+unsigned statementEndOffset(StringRef Source, unsigned Start) {
+  bool InString = false;
+  bool InCharacter = false;
+  bool Escaped = false;
+  for (unsigned Index = Start; Index < Source.size(); ++Index) {
+    const char C = Source[Index];
+    if (Escaped) {
+      Escaped = false;
+      continue;
+    }
+    if (C == '\\' && (InString || InCharacter)) {
+      Escaped = true;
+      continue;
+    }
+    if (C == '"' && !InCharacter) {
+      InString = !InString;
+      continue;
+    }
+    if (C == '\'' && !InString) {
+      InCharacter = !InCharacter;
+      continue;
+    }
+    if (!InString && !InCharacter && C == ';')
+      return Index + 1;
+  }
+  return 0;
+}
+
+class RwrAccessCollector
+    : public RecursiveASTVisitor<RwrAccessCollector> {
+public:
+  RwrAccessCollector(const PipelineContext &Context, StringRef Source,
+                     StringRef Variable)
+      : Context(Context), Source(Source), Variable(Variable),
+        SourceMgr(Context.getSourceManager()) {}
+
+  bool VisitBinaryOperator(BinaryOperator *Operator) {
+    if (!Operator->isAssignmentOp() || !isTargetLValue(Operator->getLHS()))
+      return true;
+    recordWrite(Operator->getLHS(), Operator->getEndLoc());
+    return true;
+  }
+
+  bool VisitUnaryOperator(UnaryOperator *Operator) {
+    if (!Operator->isIncrementDecrementOp() ||
+        !isTargetLValue(Operator->getSubExpr()))
+      return true;
+    recordWrite(Operator->getSubExpr(), Operator->getEndLoc());
+    return true;
+  }
+
+  bool VisitDeclRefExpr(DeclRefExpr *Reference) {
+    const auto *Declaration = dyn_cast<VarDecl>(Reference->getDecl());
+    if (!Declaration || !Declaration->hasGlobalStorage() ||
+        Declaration->getName() != Variable)
+      return true;
+    if (Type.empty())
+      Type = Declaration->getType().getAsString();
+    const unsigned Position =
+        statementEndOffset(Source, sourceOffset(SourceMgr, Reference->getEndLoc()));
+    if (Position != 0)
+      ReadCandidates.emplace_back(sourceOffset(SourceMgr, Reference->getBeginLoc()),
+                                  Position);
+    return true;
+  }
+
+  std::vector<unsigned> readEnds() const {
+    std::set<unsigned> Ends;
+    for (const auto &[Begin, End] : ReadCandidates) {
+      const bool IsWriteLValue = std::any_of(
+          WriteRanges.begin(), WriteRanges.end(), [&](const auto &Range) {
+            return Begin >= Range.first && Begin < Range.second;
+          });
+      if (!IsWriteLValue && WriteEnds.find(End) == WriteEnds.end())
+        Ends.insert(End);
+    }
+    return std::vector<unsigned>(Ends.begin(), Ends.end());
+  }
+
+  const std::set<unsigned> &writeEnds() const { return WriteEnds; }
+  StringRef type() const { return Type; }
+
+private:
+  bool isTargetLValue(const Expr *Expression) const {
+    Expression = Expression->IgnoreParenImpCasts();
+    const auto *Reference = dyn_cast<DeclRefExpr>(Expression);
+    if (!Reference)
+      return false;
+    const auto *Declaration = dyn_cast<VarDecl>(Reference->getDecl());
+    return Declaration && Declaration->hasGlobalStorage() &&
+           Declaration->getName() == Variable;
+  }
+
+  void recordWrite(const Expr *LValue, SourceLocation EndLocation) {
+    const unsigned Begin = sourceOffset(SourceMgr, LValue->getBeginLoc());
+    const unsigned End = sourceOffset(SourceMgr, LValue->getEndLoc());
+    WriteRanges.emplace_back(Begin, End);
+    const unsigned StatementEnd = statementEndOffset(
+        Source, sourceOffset(SourceMgr, EndLocation));
+    if (StatementEnd != 0)
+      WriteEnds.insert(StatementEnd);
+  }
+
+  const PipelineContext &Context;
+  StringRef Source;
+  StringRef Variable;
+  const SourceManager &SourceMgr;
+  std::string Type;
+  std::vector<std::pair<unsigned, unsigned>> WriteRanges;
+  std::vector<std::pair<unsigned, unsigned>> ReadCandidates;
+  std::set<unsigned> WriteEnds;
+};
+
+struct RwrInstrumentation {
+  unsigned Reads = 0;
+  unsigned Writes = 0;
+  std::string Type;
+};
+
+RwrInstrumentation instrumentRwrScalar(const PipelineContext &Context,
+                                        std::string &Source,
+                                        unsigned ThreadCount) {
+  RwrInstrumentation Result;
+  const StringRef Variable = Context.Options.SvpVariable;
+  if (!isIdentifier(Variable) ||
+      StringRef(Source).contains("__CS_SVP_RWR_INSTRUMENTED"))
+    return Result;
+
+  RwrAccessCollector Collector(Context, Source, Variable);
+  Collector.TraverseDecl(Context.getASTContext().getTranslationUnitDecl());
+  const std::vector<unsigned> ReadEnds = Collector.readEnds();
+  const std::set<unsigned> &WriteEnds = Collector.writeEnds();
+  if (ReadEnds.empty() && WriteEnds.empty())
+    return Result;
+
+  Result.Type = Context.Options.SvpType.empty() ? Collector.type().str()
+                                                : Context.Options.SvpType;
+  if (Result.Type.empty())
+    return Result;
+
+  std::map<unsigned, std::string> Insertions;
+  for (unsigned End : ReadEnds) {
+    Insertions[End] += "\n  {\n    " + Result.Type +
+                       " __cs_svp_rwr_read = " + Variable.str() +
+                       ";\n    if (__cs_svp_rwr_seen[__cs_thread_index])\n"
+                       "      assert(__cs_svp_rwr_read == "
+                       "__cs_svp_rwr_last[__cs_thread_index]);\n"
+                       "    __cs_svp_rwr_seen[__cs_thread_index] = 1;\n"
+                       "    __cs_svp_rwr_last[__cs_thread_index] = "
+                       "__cs_svp_rwr_read;\n  }\n";
+    ++Result.Reads;
+  }
+  for (unsigned End : WriteEnds) {
+    Insertions[End] +=
+        "\n  __cs_svp_rwr_seen[__cs_thread_index] = 0;\n";
+    ++Result.Writes;
+  }
+  for (auto It = Insertions.rbegin(); It != Insertions.rend(); ++It)
+    Source.insert(It->first, It->second);
+
+  Source = "#define __CS_SVP_RWR_INSTRUMENTED 1\n" + Result.Type +
+           " __cs_svp_rwr_last[" + std::to_string(ThreadCount) +
+           "];\nunsigned __cs_svp_rwr_seen[" +
+           std::to_string(ThreadCount) + "];\n\n" + Source;
+  return Result;
+}
+
 } // namespace
 
 llvm::StringRef InstrumenterPass::name() const { return "instrumenter"; }
@@ -175,7 +363,7 @@ llvm::Error InstrumenterPass::run(const PipelineContext &Context,
   if (!shouldRunInstrumenter(Context.Options))
     return Error::success();
 
-  std::string Source = materializeRawLines(materializeSource(Context, Result));
+  std::string Source = materializeSource(Context, Result);
   std::vector<unsigned> ThreadSizes = parseThreadSizes(Source);
   if (ThreadSizes.empty()) {
     // Raw lines still belong to the backend-only representation even when a
@@ -187,6 +375,12 @@ llvm::Error InstrumenterPass::run(const PipelineContext &Context,
         "phase6: instrumenter 未发现 lazyseq 线程大小元数据，保持源码不变");
     return Error::success();
   }
+
+  RwrInstrumentation Rwr;
+  if (Context.Options.SvpMode == "rwr")
+    Rwr = instrumentRwrScalar(Context, Source,
+                               static_cast<unsigned>(ThreadSizes.size()));
+  Source = materializeRawLines(Source);
 
   unsigned MaxThreadSize =
       *std::max_element(ThreadSizes.begin(), ThreadSizes.end());
@@ -223,6 +417,16 @@ llvm::Error InstrumenterPass::run(const PipelineContext &Context,
       formatv("phase6: instrumenter 已映射 CBMC 原语、注入 nondet 声明，并降级控制变量 bitwidth(pc={0}, thread={1})",
               PcWidth, ThreadWidth)
           .str());
+  if (Context.Options.SvpMode == "rwr") {
+    if (Rwr.Reads || Rwr.Writes)
+      Result.Notes.push_back(
+          formatv("phase6: instrumenter 已插入 rwr 标量访问序监控（变量 {0}，读 {1} 处，写 {2} 处）",
+                  Context.Options.SvpVariable, Rwr.Reads, Rwr.Writes)
+              .str());
+    else
+      Result.Notes.push_back(
+          "phase6: rwr 当前仅支持命名标量全局变量的直接读写；未发现可插桩访问");
+  }
   return Error::success();
 }
 

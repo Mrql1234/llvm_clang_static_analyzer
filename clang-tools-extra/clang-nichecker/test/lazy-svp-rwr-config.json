@@ -1,0 +1,6 @@
+{
+  "mode": "rwr",
+  "type": "int",
+  "globalVariable": "state",
+  "isMt": true
+}

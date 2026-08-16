@@ -977,6 +977,26 @@ build-clang/bin/clang-nichecker \
 
 预期分析信息包含“`slice 已通过 legacy jar 生成输出`”。对应临时目录 `clang-nichecker-legacy-*/data.json` 中会有 `"mode": "rww"` 与 `"var": "state"`，证明 JSON 已进入原 jar 协议而未读取 Python pickle。
 
+### rwr 标量访问序
+
+入口文件为 `clang-tools-extra/clang-nichecker/lib/Passes/InstrumenterPass.cpp`。当 JSON 或 `--svp-mode=rwr` 选择命名标量全局变量时，instrumenter 在最后一次 AST 重解析之后插入 Python `deal_with_svp()` 的 rwr 核心状态机：读取目标变量后保存该线程快照；同线程连续读会断言快照相等；直接赋值或自增写入会清空该线程的读取快照。该阶段随后才降级为 CBMC 后端文本，因此不会要求 Clang 再次解析 bitvector 语法。
+
+回归输入为 `clang-tools-extra/clang-nichecker/test/lazy-svp-rwr-input.c`，配置为 `clang-tools-extra/clang-nichecker/test/lazy-svp-rwr-config.json`：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,duplicator,lazyseq,instrumenter \
+  --svp-config=clang-tools-extra/clang-nichecker/test/lazy-svp-rwr-config.json \
+  --rounds=1 -print-analysis -output=/tmp/lazy-svp-rwr.c \
+  clang-tools-extra/clang-nichecker/test/lazy-svp-rwr-input.c -- -w
+grep -n -E '__cs_svp_rwr_(read|last|seen)|assert\(__cs_svp_rwr_read' \
+  /tmp/lazy-svp-rwr.c
+```
+
+预期产物含有 `__cs_svp_rwr_last`、`__cs_svp_rwr_seen`、读取快照与断言，以及每次 `state` 直接写入后的 `seen` 清空。数组下标、指针别名、复杂表达式以及 `rww`、`wwr`、`wrw` 仍在继续迁移，不能把该标量回归视为完整 SVP 覆盖。
+
 ### 随机 ISR 时间约束回归
 
 ```bash
