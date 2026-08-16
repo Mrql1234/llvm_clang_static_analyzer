@@ -242,6 +242,54 @@ std::string getCalleeName(const CallExpr *Call, const PipelineContext &Context) 
   return Name ? *Name : "";
 }
 
+class VisibleLazyStatementCollector
+    : public RecursiveASTVisitor<VisibleLazyStatementCollector> {
+public:
+  explicit VisibleLazyStatementCollector(const PipelineContext &Context)
+      : Context(Context) {}
+
+  bool VisitDeclRefExpr(DeclRefExpr *Reference) {
+    const auto *Variable = dyn_cast<VarDecl>(Reference->getDecl());
+    if (Variable && Variable->hasGlobalStorage())
+      Visible = true;
+    return true;
+  }
+
+  bool VisitCallExpr(CallExpr *Call) {
+    const std::string Name = getCalleeName(Call, Context);
+    // The Python global-access analysis exposes synchronization calls as
+    // scheduling points even when their address is held in a local variable.
+    if (Name == "pthread_mutex_init" || Name == "pthread_mutex_lock" ||
+        Name == "pthread_mutex_unlock" || Name == "pthread_mutex_destroy" ||
+        Name == "pthread_cond_wait_1" || Name == "pthread_cond_wait_2" ||
+        Name == "pthread_cond_signal" || Name == "pthread_cond_broadcast" ||
+        Name == "pthread_barrier_wait_1" ||
+        Name == "pthread_barrier_wait_2")
+      Visible = true;
+    return true;
+  }
+
+  bool isVisible() const { return Visible; }
+
+private:
+  const PipelineContext &Context;
+  bool Visible = false;
+};
+
+bool isVisibleLazyStatement(const Stmt *Statement, const ThreadPlan &Plan,
+                            const PipelineContext &Context) {
+  // Instrumenter injects event/timer activation after every main-task
+  // assignment. Its continuation PC must point at a concrete resume label.
+  if (Plan.Name == "main_task_0")
+    if (const auto *Assignment = dyn_cast<BinaryOperator>(Statement))
+      if (Assignment->isAssignmentOp())
+        return true;
+
+  VisibleLazyStatementCollector Collector(Context);
+  Collector.TraverseStmt(const_cast<Stmt *>(Statement));
+  return Collector.isVisible();
+}
+
 const FunctionDecl *functionFromThreadStartArgument(const CallExpr *Call) {
   if (!Call || Call->getNumArgs() < 3)
     return nullptr;
@@ -1263,8 +1311,33 @@ std::string rewriteFunctionBody(
   }
 
   std::string Output = "{\n" + HoistedDeclarations;
+  std::vector<const Stmt *> Statements(Body->body_begin(), Body->body_end());
+  std::vector<bool> VisibleStatements;
+  VisibleStatements.reserve(Statements.size());
+  for (const Stmt *Statement : Statements)
+    VisibleStatements.push_back(isVisibleLazyStatement(Statement, Plan, Context));
+
+  unsigned VisibleCount =
+      static_cast<unsigned>(std::count(VisibleStatements.begin(),
+                                       VisibleStatements.end(), true));
+  // A thread without shared accesses is still a schedulable unit. Keep its
+  // complete body in one segment rather than generating a zero-sized thread.
+  if (VisibleCount == 0) {
+    if (!VisibleStatements.empty())
+      VisibleStatements.back() = true;
+    VisibleCount = 1;
+  }
+
   unsigned StatementIndex = 0;
-  for (const Stmt *Statement : Body->body()) {
+  if (!Statements.empty())
+    Output += formatv("  __CS_LAZY_IF({0}, 0, {1});\n", Plan.Index,
+                      generatedLabelName(Plan, 1))
+                  .str();
+  else
+    Output += generatedLabelName(Plan, 1) + ":\n  ;\n";
+
+  for (size_t Position = 0; Position < Statements.size(); ++Position) {
+    const Stmt *Statement = Statements[Position];
     std::optional<std::string> Text = sourceText(Statement, Context);
     if (!Text)
       continue;
@@ -1422,13 +1495,19 @@ std::string rewriteFunctionBody(
 
     if (Rewritten.empty())
       continue;
-    Output += formatv("  __CS_LAZY_IF({0}, {1}, {2});\n", Plan.Index,
-                      StatementIndex,
-                      generatedLabelName(Plan, StatementIndex + 1))
-                  .str();
     Output += indentLines(Rewritten, "  ");
-    Output += "\n" + generatedLabelName(Plan, StatementIndex + 1) + ":\n  ;\n";
+    if (!VisibleStatements[Position]) {
+      Output += "\n";
+      continue;
+    }
+
     ++StatementIndex;
+    Output += "\n" + generatedLabelName(Plan, StatementIndex) + ":\n  ;\n";
+    if (StatementIndex < VisibleCount)
+      Output += formatv("  __CS_LAZY_IF({0}, {1}, {2});\n", Plan.Index,
+                        StatementIndex,
+                        generatedLabelName(Plan, StatementIndex + 1))
+                    .str();
   }
   Output += "  __cs_pthread_exit();\n";
   if (Plan.Function->getReturnType()->isVoidType())

@@ -931,6 +931,32 @@ grep -n -E '__CS_CBMC_EXTRA_DECLS|nondet_int\(\)|__VERIFIER_(assume|nondet)|__CP
 
 预期产物包含 `__CS_CBMC_EXTRA_DECLS` 和 `nondet_int()`，不包含输入源码中的 `__VERIFIER_assume` 或 `__VERIFIER_nondet_int` 调用；`__CPROVER_assume` 保留为 CBMC 后端原语。
 
+## 2026-08：lazyseq 可见访问点切分
+
+入口文件为 `clang-tools-extra/clang-nichecker/lib/Passes/LazySequentializationPass.cpp`。Python `lazyseq` 并非为每条顶层语句建立恢复点：它只在全局存储访问和同步调用等可见共享访问点插入 `IF(thread, pc, label)`。C++ 的 `VisibleLazyStatementCollector` 现在采用相同粒度：不含共享访问的连续语句会保留在相邻恢复点之间；`main_task_0` 的赋值仍单独作为恢复点，确保 event/timer 激活写入的 continuation PC 可以恢复。
+
+以下命令同时生成 Python 和 C++ 的 lazyseq 阶段产物，用于验证迁移是否正确：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer/nichecker/Cseq
+python3 cseq.py -l lazy_until_replacegoto \
+  --input examples/lazy_unsafe.c --unwind 1 --rounds 1 -D
+
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,duplicator,lazyseq --rounds=1 \
+  -output=/tmp/native-lazyseq-visible.c \
+  nichecker/Cseq/examples/lazy_unsafe.c -- -I./nichecker/Cseq/core/include
+build-clang/bin/clang -fsyntax-only \
+  -Wno-implicit-function-declaration -Wno-return-type \
+  /tmp/native-lazyseq-visible.c
+grep -n '__cs_thread_lines' nichecker/Cseq/log/_19_output__lazyseq.c \
+  /tmp/native-lazyseq-visible.c
+```
+
+`lazy_unsafe.c` 的 Python 与 C++ 产物均应给出线程行数 `{1, 3, 3, 3}`：main 只有 mutex 初始化这个可见恢复点，三个 worker 分别是 lock、共享变量访问、unlock 三个恢复点。Python 的 `_19_output__lazyseq.c` 含有后续 instrumenter 才会使用的 `__CPROVER_bitvector[...]` 语法；C++ 对照应停在 `lazyseq`，此时仍是可由 Clang 重解析的标准 C。完整 profile 在 instrumenter 后进入后端文本阶段，不应再以 Clang 语法检查。
+
 ## 2026-08：modefile 的原生 JSON 替代
 
 入口文件为 `clang-tools-extra/clang-nichecker/ClangNIChecker.cpp`，配置载体为 `PipelineOptions`（`clang-tools-extra/clang-nichecker/include/clang-nichecker/Support/Types.h`）。Python GUI/命令行原先以 pickle 写入 `nichecker/Cseq/modules/modefile`，字段为 `mode`、`type`、`globalVariable` 和 `isMt`。C++ 不读取该 pickle，改用 `--svp-config=<JSON>` 或显式 `--svp-mode`、`--svp-type`、`--svp-var`；显式参数优先于 JSON。
