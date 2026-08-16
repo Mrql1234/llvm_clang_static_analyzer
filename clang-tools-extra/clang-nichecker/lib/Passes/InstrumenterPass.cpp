@@ -135,6 +135,37 @@ void lowerControlVariablesWithPrefix(std::string &Source, StringRef Prefix,
   }
 }
 
+void lowerVerifierPrimitives(std::string &Source, StringRef Backend) {
+  // Keep this table aligned with modules/instrumenter.py.  These names are
+  // backend syntax, so this runs only after the final AST-reparse boundary.
+  if (Backend != "cbmc" && Backend != "cbmc-ext" &&
+      Backend != "cbmc-5.10" && Backend != "cbmc-svcomp2020")
+    return;
+
+  replaceAll(Source, "__VERIFIER_assume", "__CPROVER_assume");
+  replaceAll(Source, "__VERIFIER_assertext", "__CPROVER_assert");
+  replaceAll(Source, "__VERIFIER_assert", "assert");
+  replaceAll(Source, "__VERIFIER_nondet_int", "nondet_int");
+  replaceAll(Source, "__VERIFIER_nondet_uint", "nondet_uint");
+  replaceAll(Source, "__VERIFIER_nondet_bool", "nondet_bool");
+  replaceAll(Source, "__VERIFIER_nondet_char", "nondet_char");
+  replaceAll(Source, "__VERIFIER_nondet_uchar", "nondet_uchar");
+}
+
+std::string cbmcExtraDeclarations() {
+  return R"(/* Native equivalent of modules/cbmc_extra.c. */
+#ifndef __CS_CBMC_EXTRA_DECLS
+#define __CS_CBMC_EXTRA_DECLS
+extern int nondet_int(void);
+extern unsigned int nondet_uint(void);
+extern _Bool nondet_bool(void);
+extern char nondet_char(void);
+extern unsigned char nondet_uchar(void);
+#endif
+
+)";
+}
+
 } // namespace
 
 llvm::StringRef InstrumenterPass::name() const { return "instrumenter"; }
@@ -162,8 +193,7 @@ llvm::Error InstrumenterPass::run(const PipelineContext &Context,
   const unsigned PcWidth = bitWidth(MaxThreadSize);
   const unsigned ThreadWidth = bitWidth(ThreadSizes.size());
 
-  replaceAll(Source, "__VERIFIER_assume", "__CPROVER_assume");
-  replaceAll(Source, "__VERIFIER_assertext", "__CPROVER_assert");
+  lowerVerifierPrimitives(Source, Context.Options.Backend);
   lowerControlVariable(Source, "__cs_active_thread", 1);
   lowerControlVariable(Source, "__cs_disable_thread", 1);
   lowerControlVariable(Source, "__cs_pc", PcWidth);
@@ -179,13 +209,18 @@ llvm::Error InstrumenterPass::run(const PipelineContext &Context,
   if (Context.Options.NoRoundRobin)
     lowerControlVariablesWithPrefix(Source, "__cs_tmp_t", PcWidth);
   lowerControlVariablesWithPrefix(Source, "__cs_run_t", 1);
+  if (Context.Options.Backend == "cbmc" ||
+      Context.Options.Backend == "cbmc-ext" ||
+      Context.Options.Backend == "cbmc-5.10" ||
+      Context.Options.Backend == "cbmc-svcomp2020")
+    Source = cbmcExtraDeclarations() + Source;
   Source = "#define __CS_LAZY_INSTRUMENTED 1\n" + Source;
 
   Result.Source = std::move(Source);
   Result.PendingReplacements.clear();
   Result.RequiresASTReparse = false;
   Result.Notes.push_back(
-      formatv("phase6: instrumenter 已映射 CBMC assume，并降级控制变量 bitwidth(pc={0}, thread={1})",
+      formatv("phase6: instrumenter 已映射 CBMC 原语、注入 nondet 声明，并降级控制变量 bitwidth(pc={0}, thread={1})",
               PcWidth, ThreadWidth)
           .str());
   return Error::success();

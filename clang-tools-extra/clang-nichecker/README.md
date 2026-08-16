@@ -874,7 +874,7 @@ grep -n -E '__cs_timer_counter\[2\]|__cs_active_thread\[2\] = [01]' \
   /tmp/lazy-interrupt-timer.c
 ```
 
-timer ISR 同样延后到主任务中激活。每个主任务赋值使对应 `__cs_timer_counter` 加一；计数到达 `t + constraint` 时，runtime 重新设置计数器、激活 timer 线程、清零其 PC 并让出当前上下文。timer 多实例、循环体内赋值和 `constraint>0` 的 nondet 初始相位均已迁移；完整时间约束仍待继续收敛。
+timer ISR 同样延后到主任务中激活。每个主任务赋值使对应 `__cs_timer_counter` 加一；计数到达 `t + constraint` 时，runtime 重新设置计数器、激活 timer 线程、清零其 PC 并让出当前上下文。timer 多实例、循环体内赋值和 `constraint>0` 的 signed nondet 初始相位均已迁移；event 最大间隔和 context-bounded 的完整时间分支仍待继续收敛。
 
 ### timer 多实例回归
 
@@ -906,11 +906,30 @@ build-clang/bin/clang-nichecker \
   --isr-config=clang-tools-extra/clang-nichecker/test/lazy-interrupt-timer-jitter-config.json \
   --unwind=2 --rounds=1 -output=/tmp/lazy-interrupt-timer-jitter.c \
   clang-tools-extra/clang-nichecker/test/lazy-interrupt-timer-multi-input.c -- -w
-grep -n -E 'nondet_int|__cs_timer_counter\[2\].*== 2|timer_counter\[2\] <= 2' \
+grep -n -E 'nondet_int|__cs_timer_counter\[2\].*== 2|timer_counter\[2\].*>= 0.*<= 2' \
   /tmp/lazy-interrupt-timer-jitter.c
 ```
 
-预期产物含有 `nondet_int()` 和 `__VERIFIER_assume(__cs_timer_counter[2] <= 2)`，并在主任务计时点使用 `== 2` 触发 timer。`constraint=0` 的旧配置不引入非确定性相位，保持计数器从零开始的既有行为。
+预期产物含有 `nondet_int()` 和 `__VERIFIER_assume(__cs_timer_counter[2] >= 0 && __cs_timer_counter[2] <= 2)`，并在主任务计时点使用 `== 2` 触发 timer。`constraint=0` 的旧配置不引入非确定性相位，保持计数器从零开始的既有行为。
+
+## 2026-08：instrumenter 的 CBMC 原语与声明迁移
+
+入口文件为 `clang-tools-extra/clang-nichecker/lib/Passes/InstrumenterPass.cpp`，回归输入为 `clang-tools-extra/clang-nichecker/test/lazy-instrumenter-primitives-input.c`。该部分迁移 Python `nichecker/Cseq/modules/instrumenter.py` 的 CBMC 原语映射和 `modules/cbmc_extra.c` 声明注入：`__VERIFIER_assume`、`__VERIFIER_assertext`、`__VERIFIER_assert` 与五个 `__VERIFIER_nondet_*` 名称会在 `cbmc`、`cbmc-ext`、`cbmc-5.10`、`cbmc-svcomp2020` 后端改写为对应的后端原语。最终文件还会在 lazyseq runtime 前注入带 include guard 的 `nondet_*` 函数声明。
+
+该转换发生在最后一次 AST 重解析之后，生成 `__CPROVER_bitvector[...]` 后不会再由 Clang 解析；后续 `replacegoto`、`mapper`、`feeder` 和 `cex` 只消费后端文本。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,duplicator,lazyseq,instrumenter,replacegoto \
+  --backend=cbmc -output=/tmp/lazy-instrumenter-primitives.c \
+  clang-tools-extra/clang-nichecker/test/lazy-instrumenter-primitives-input.c -- -w
+grep -n -E '__CS_CBMC_EXTRA_DECLS|nondet_int\(\)|__VERIFIER_(assume|nondet)|__CPROVER_assume' \
+  /tmp/lazy-instrumenter-primitives.c
+```
+
+预期产物包含 `__CS_CBMC_EXTRA_DECLS` 和 `nondet_int()`，不包含输入源码中的 `__VERIFIER_assume` 或 `__VERIFIER_nondet_int` 调用；`__CPROVER_assume` 保留为 CBMC 后端原语。
 
 ### 随机 ISR 时间约束回归
 

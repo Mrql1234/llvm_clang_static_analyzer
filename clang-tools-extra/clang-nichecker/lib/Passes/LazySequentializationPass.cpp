@@ -293,7 +293,9 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans,
   OS << "#ifndef assert\n#define assert(Condition) \\\n  do { if (!(Condition)) __VERIFIER_error(); } while (0)\n#endif\n";
   OS << "static unsigned __cs_active_thread[" << Plans.size() << "] = {1};\n";
   OS << "static unsigned __cs_disable_thread[" << Plans.size() << "] = {0};\n";
-  OS << "static unsigned __cs_timer_counter[" << Plans.size() << "] = {0};\n";
+  // Python instrumenter keeps timer phases signed: a nondeterministic phase
+  // is constrained to [0, 2 * constraint] before the next period starts.
+  OS << "static int __cs_timer_counter[" << Plans.size() << "] = {0};\n";
   OS << "static unsigned __cs_counter = 0;\n";
   OS << "static unsigned __cs_counter_before = 0;\n";
   OS << "static unsigned __cs_pc[" << Plans.size() << "] = {0};\n";
@@ -474,9 +476,9 @@ std::string buildTimerPhaseInitialization(const std::vector<ThreadPlan> &Plans) 
     const std::string Family = baseThreadName(Plan.Name).str();
     if (!TimerFamilies.insert(Family).second)
       continue;
-    OS << "  __cs_timer_counter[" << Plan.Index
-       << "] = (unsigned)nondet_int();\n";
-    OS << "  __VERIFIER_assume(__cs_timer_counter[" << Plan.Index << "] <= "
+    OS << "  __cs_timer_counter[" << Plan.Index << "] = nondet_int();\n";
+    OS << "  __VERIFIER_assume(__cs_timer_counter[" << Plan.Index
+       << "] >= 0 && __cs_timer_counter[" << Plan.Index << "] <= "
        << 2 * Plan.Constraint << ");\n";
   }
   return OS.str();
@@ -1045,9 +1047,10 @@ std::string buildDeferredTimerActivation(const ThreadPlan &Plan,
       OS << "  __cs_timer_counter[" << Candidate.Index << "] = 0;\n";
     else {
       OS << "  __cs_timer_counter[" << Candidate.Index
-         << "] = (unsigned)nondet_int();\n";
+         << "] = nondet_int();\n";
       OS << "  __VERIFIER_assume(__cs_timer_counter[" << Candidate.Index
-         << "] <= " << 2 * Candidate.Constraint << ");\n";
+         << "] >= 0 && __cs_timer_counter[" << Candidate.Index << "] <= "
+         << 2 * Candidate.Constraint << ");\n";
     }
     for (const ThreadPlan &Instance : Plans) {
       if (Instance.Kind != "timer" || baseThreadName(Instance.Name) != Family)
