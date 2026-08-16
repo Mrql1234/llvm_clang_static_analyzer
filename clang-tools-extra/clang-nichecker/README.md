@@ -798,3 +798,22 @@ grep -n '__cs_disable_thread' /tmp/lazy-interrupt-mask.c
 预期 `interrupt_high_0` 仅在自身 PC 为 0 时启动，且没有优先级等待条件；首轮的 `main_task_0` 不应用完成门控。第二个回归产物应包含 `__cs_disable_thread` 数组、屏蔽/恢复赋值以及每个 scheduler 分支上的屏蔽检查。此行为对应旧 Python 随机 ISR 分支：最高优先级 ISR 可立即抢占，低优先级随机 ISR 只受非最高优先级候选的完成状态约束。当前仍未迁移 GUI `dictfile` 中的 `event`、`timer`、周期和时间约束字段。
 
 Python/C++ 分段对比继续使用本 README 前文的 `lazy_until_replacegoto` 命令：Python 的模块产物位于 `nichecker/Cseq/log/*_output__<模块>.c`，C++ 通过 `--pipeline=<截至模块>` 和 `-output=/tmp/<模块>.c` 输出对应阶段源码。对 ISR 优先级输入，应首先比较 `lazyseq` 后调度器中每个 `__cs_active_thread` 分支的 PC 完成门控。
+
+## 2026-08：dictfile 的原生 JSON 替代
+
+旧 Python GUI 将 ISR 元数据以 pickle 写入 `modules/dictfile`。C++ 不读取该 Python 私有二进制格式，改由 `--isr-config=<文件>` 接收 JSON；入口在 `clang-tools-extra/clang-nichecker/ClangNIChecker.cpp`，加载与校验位于 `clang-tools-extra/clang-nichecker/lib/Analysis/ProgramAnalyzer.cpp`。每个键是函数名，支持与 GUI 一致的 `kind`、`prio`、`t`、`event` 和 `constraint` 字段。配置可以覆盖源代码相邻 `// priority N` 注释，也可以声明不符合 ISR 命名约定的函数。
+
+运行命令：
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+build-clang/bin/clang-nichecker \
+  --pipeline-profile=lazy \
+  --isr-config=clang-tools-extra/clang-nichecker/test/lazy-interrupt-config.json \
+  --rounds=1 -output=/tmp/lazy-interrupt-config.c \
+  clang-tools-extra/clang-nichecker/test/lazy-interrupt-priority-input.c -- -w
+grep -n -E 'interrupt_(low|high)_0|__cs_pc\[[23]\] != 0' \
+  /tmp/lazy-interrupt-config.c
+```
+
+该回归 JSON 将源注释中的优先级反转，预期 `interrupt_low_0` 而非 `interrupt_high_0` 带有仅首次启动的 PC 条件，证明 lazyseq 使用了原生配置而非注释默认值。event/timer 的动态创建和时间约束将在后续模块继续迁移。

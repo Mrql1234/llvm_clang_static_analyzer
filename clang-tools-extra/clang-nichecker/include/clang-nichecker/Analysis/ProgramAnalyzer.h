@@ -23,6 +23,8 @@ private:
 };
 
 ProgramSummary analyzeProgram(ASTContext &Context);
+llvm::Error applyInterruptConfig(ProgramSummary &Summary,
+                                 llvm::StringRef ConfigPath);
 ProgramSummary refreshSummaryForCurrentAST(ASTContext &Context,
                                            const ProgramSummary &Previous);
 

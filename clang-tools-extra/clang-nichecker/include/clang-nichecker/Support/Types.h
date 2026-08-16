@@ -54,6 +54,7 @@ struct PipelineOptions {
   unsigned Cores = 1;
   unsigned Threads = 0;
   std::string Schedule;
+  std::string InterruptConfigPath;
   bool NoRoundRobin = false;
   bool NondetCondvarWakeups = false;
   std::string Backend = "cbmc";

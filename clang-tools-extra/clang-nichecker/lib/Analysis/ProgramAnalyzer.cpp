@@ -4,6 +4,9 @@
 #include <cctype>
 #include <cstring>
 
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/MemoryBuffer.h"
+
 using namespace clang;
 
 namespace clang::nichecker {
@@ -121,6 +124,68 @@ ProgramSummary analyzeProgram(ASTContext &Context) {
   ProgramAnalyzer Analyzer(Context);
   Analyzer.TraverseDecl(Context.getTranslationUnitDecl());
   return Analyzer.finalize();
+}
+
+llvm::Error applyInterruptConfig(ProgramSummary &Summary,
+                                 llvm::StringRef ConfigPath) {
+  auto BufferOrError = llvm::MemoryBuffer::getFile(ConfigPath);
+  if (!BufferOrError)
+    return llvm::errorCodeToError(BufferOrError.getError());
+  llvm::Expected<llvm::json::Value> Value =
+      llvm::json::parse((*BufferOrError)->getBuffer());
+  if (!Value)
+    return Value.takeError();
+  llvm::json::Object *Root = Value->getAsObject();
+  if (!Root)
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "ISR 配置必须是 JSON 对象: %s",
+                                   ConfigPath.str().c_str());
+
+  for (const auto &Entry : *Root) {
+    const llvm::json::Object *Object = Entry.second.getAsObject();
+    if (!Object)
+      return llvm::createStringError(
+          llvm::inconvertibleErrorCode(),
+          "ISR 配置项 '%s' 必须是 JSON 对象", Entry.first.str().c_str());
+    InterruptInfo *Info = nullptr;
+    for (InterruptInfo &Candidate : Summary.InterruptInfos)
+      if (Candidate.Name == Entry.first) {
+        Info = &Candidate;
+        break;
+      }
+    if (!Info) {
+      Summary.InterruptFunctions.push_back(Entry.first.str());
+      Summary.InterruptInfos.push_back(InterruptInfo{Entry.first.str()});
+      Info = &Summary.InterruptInfos.back();
+    }
+    if (std::optional<llvm::StringRef> Kind = Object->getString("kind"))
+      Info->Kind = Kind->str();
+    if (std::optional<int64_t> Priority = Object->getInteger("prio")) {
+      if (*Priority < 0)
+        return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                       "ISR '%s' 的 prio 不能为负数",
+                                       Entry.first.str().c_str());
+      Info->Priority = static_cast<unsigned>(*Priority);
+    }
+    if (std::optional<int64_t> Period = Object->getInteger("t")) {
+      if (*Period < 0)
+        return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                       "ISR '%s' 的 t 不能为负数",
+                                       Entry.first.str().c_str());
+      Info->Period = static_cast<unsigned>(*Period);
+    }
+    if (std::optional<llvm::StringRef> Event = Object->getString("event"))
+      Info->Event = Event->str();
+    if (std::optional<int64_t> Constraint =
+            Object->getInteger("constraint")) {
+      if (*Constraint < 0)
+        return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                       "ISR '%s' 的 constraint 不能为负数",
+                                       Entry.first.str().c_str());
+      Info->Constraint = static_cast<unsigned>(*Constraint);
+    }
+  }
+  return llvm::Error::success();
 }
 
 ProgramSummary refreshSummaryForCurrentAST(ASTContext &Context,

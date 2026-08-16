@@ -68,6 +68,10 @@ static cl::opt<std::string>
     ScheduleOpt("schedule", cl::cat(ClangNICheckerCategory),
                 cl::desc("lazy 轮次调度限制，例如 0,1:2 或 +:+"));
 
+static cl::opt<std::string>
+    InterruptConfigOpt("isr-config", cl::cat(ClangNICheckerCategory),
+                       cl::desc("ISR 元数据 JSON 文件，替代旧 Python dictfile"));
+
 static cl::opt<bool>
     NoRoundRobinOpt("norobin", cl::cat(ClangNICheckerCategory),
                     cl::desc("使用 Python lazyseq 的非轮转调度器"));
@@ -147,6 +151,7 @@ int main(int argc, const char **argv) {
   Options.Cores = CoresOpt;
   Options.Threads = ThreadsOpt;
   Options.Schedule = ScheduleOpt;
+  Options.InterruptConfigPath = InterruptConfigOpt;
   Options.NoRoundRobin = NoRoundRobinOpt;
   Options.NondetCondvarWakeups = NondetCondvarWakeupsOpt;
   Options.EnableLoopAbstraction = EnableLoopAbstractionOpt;
