@@ -861,7 +861,7 @@ grep -n -E '__cs_timer_counter\[2\]|__cs_active_thread\[2\] = [01]' \
   /tmp/lazy-interrupt-timer.c
 ```
 
-timer ISR 同样延后到主任务中激活。每个主任务赋值使对应 `__cs_timer_counter` 加一；计数到达 `t + constraint` 时，runtime 清零计数、激活 timer 线程、清零其 PC 并让出当前上下文。当前版本使用确定性初始相位；timer 多实例和循环体内的赋值点均已迁移，Python 的 nondet 初始相位与完整时间约束仍待收敛。
+timer ISR 同样延后到主任务中激活。每个主任务赋值使对应 `__cs_timer_counter` 加一；计数到达 `t + constraint` 时，runtime 重新设置计数器、激活 timer 线程、清零其 PC 并让出当前上下文。timer 多实例、循环体内赋值和 `constraint>0` 的 nondet 初始相位均已迁移；完整时间约束仍待继续收敛。
 
 ### timer 多实例回归
 
@@ -879,7 +879,25 @@ grep -n -E 'interrupt_timer_[01]|__cs_timer_counter\[1\]|__cs_active_thread\[[12
   /tmp/lazy-interrupt-timer-multi.c
 ```
 
-预期 wrapper 中存在两次 `pthread_create(... interrupt_timer, ...)`，duplicator 后为 `interrupt_timer_0` 和 `interrupt_timer_1`。主任务循环体的每个计时点只递增 `__cs_timer_counter[2]`；到期后按顺序激活第一个未激活副本，并在其已激活时继续尝试下一个副本。当前仍使用确定性初始相位，timer 的 `constraint` 暂按 `t + constraint` 延后首次及后续触发。
+预期 wrapper 中存在两次 `pthread_create(... interrupt_timer, ...)`，duplicator 后为 `interrupt_timer_0` 和 `interrupt_timer_1`。主任务循环体的每个计时点只递增 `__cs_timer_counter[2]`；到期后按顺序激活第一个未激活副本，并在其已激活时继续尝试下一个副本。`constraint=0` 时从零相位开始，timer 的触发阈值为 `t + constraint`。
+
+### timer 随机相位回归
+
+入口仍为 `clang-tools-extra/clang-nichecker/lib/Passes/LazySequentializationPass.cpp`，配置文件为 `clang-tools-extra/clang-nichecker/test/lazy-interrupt-timer-jitter-config.json`。该实现对应 Python `nichecker/Cseq/pycparser/newParser/c_generator.py` 的 `visit_mainTaskBody()`：每个 timer 函数族在首次调度和每次到期后以 `nondet_int()` 选择 `[0, 2 * constraint]` 内的计数器初相位，并使用等号判断 `counter == t + constraint`。
+
+```bash
+cd /home/q/code/llvm_clang_static_analyzer
+ninja -C build-clang -j1 clang-nichecker
+build-clang/bin/clang-nichecker \
+  --pipeline=program-classifier,interrupt-lowering,duplicator,lazyseq,instrumenter \
+  --isr-config=clang-tools-extra/clang-nichecker/test/lazy-interrupt-timer-jitter-config.json \
+  --unwind=2 --rounds=1 -output=/tmp/lazy-interrupt-timer-jitter.c \
+  clang-tools-extra/clang-nichecker/test/lazy-interrupt-timer-multi-input.c -- -w
+grep -n -E 'nondet_int|__cs_timer_counter\[2\].*== 2|timer_counter\[2\] <= 2' \
+  /tmp/lazy-interrupt-timer-jitter.c
+```
+
+预期产物含有 `nondet_int()` 和 `__VERIFIER_assume(__cs_timer_counter[2] <= 2)`，并在主任务计时点使用 `== 2` 触发 timer。`constraint=0` 的旧配置不引入非确定性相位，保持计数器从零开始的既有行为。
 
 ### 随机 ISR 时间约束回归
 

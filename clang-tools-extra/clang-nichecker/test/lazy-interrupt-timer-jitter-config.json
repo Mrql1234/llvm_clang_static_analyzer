@@ -1,0 +1,9 @@
+{
+  "interrupt_timer": {
+    "kind": "timer",
+    "prio": 0,
+    "t": 1,
+    "event": "",
+    "constraint": 1
+  }
+}

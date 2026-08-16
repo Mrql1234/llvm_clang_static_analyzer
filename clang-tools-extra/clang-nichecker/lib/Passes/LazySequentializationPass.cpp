@@ -159,6 +159,13 @@ bool hasRandomConstraint(const std::vector<ThreadPlan> &Plans) {
   return false;
 }
 
+bool hasTimerConstraint(const std::vector<ThreadPlan> &Plans) {
+  for (const ThreadPlan &Plan : Plans)
+    if (Plan.IsInterrupt && Plan.Kind == "timer" && Plan.Constraint != 0)
+      return true;
+  return false;
+}
+
 std::string buildRandomTimeGate(const ThreadPlan &Plan,
                                 const std::vector<ThreadPlan> &Plans,
                                 bool IsMultiThreaded, unsigned Round) {
@@ -277,6 +284,8 @@ std::string buildRuntimePrelude(const std::vector<ThreadPlan> &Plans,
   OS << "/* Native lazyseq runtime state. instrumenter adds CBMC bitwidths later. */\n";
   OS << "extern void __VERIFIER_assume(int);\n";
   OS << "extern void __VERIFIER_error(void);\n";
+  if (hasTimerConstraint(Plans))
+    OS << "extern int nondet_int(void);\n";
   OS << "#ifndef NULL\n#define NULL 0\n#endif\n";
   OS << "#ifndef assert\n#define assert(Condition) \\\n  do { if (!(Condition)) __VERIFIER_error(); } while (0)\n#endif\n";
   OS << "static unsigned __cs_active_thread[" << Plans.size() << "] = {1};\n";
@@ -452,6 +461,24 @@ buildRoundSelections(StringRef Schedule, unsigned Rounds, unsigned ThreadCount) 
   return Selections;
 }
 
+std::string buildTimerPhaseInitialization(const std::vector<ThreadPlan> &Plans) {
+  std::string Initialization;
+  raw_string_ostream OS(Initialization);
+  StringSet<> TimerFamilies;
+  for (const ThreadPlan &Plan : Plans) {
+    if (Plan.Kind != "timer" || Plan.Constraint == 0)
+      continue;
+    const std::string Family = baseThreadName(Plan.Name).str();
+    if (!TimerFamilies.insert(Family).second)
+      continue;
+    OS << "  __cs_timer_counter[" << Plan.Index
+       << "] = (unsigned)nondet_int();\n";
+    OS << "  __VERIFIER_assume(__cs_timer_counter[" << Plan.Index << "] <= "
+       << 2 * Plan.Constraint << ");\n";
+  }
+  return OS.str();
+}
+
 std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
                            const std::vector<std::vector<bool>> &Selections,
                            bool IsMultiThreaded) {
@@ -460,6 +487,7 @@ std::string buildScheduler(const std::vector<ThreadPlan> &Plans,
   const unsigned Rounds = static_cast<unsigned>(Selections.size());
 
   OS << "\nint main(void)\n{\n";
+  OS << buildTimerPhaseInitialization(Plans);
   for (unsigned Round = 0; Round < Rounds; ++Round) {
     OS << "  /* lazyseq round " << Round << " */\n";
     for (const ThreadPlan &Plan : Plans) {
@@ -595,6 +623,7 @@ std::string buildNoRoundRobinScheduler(const std::vector<ThreadPlan> &Plans,
   };
 
   OS << "\nint main(void)\n{\n";
+  OS << buildTimerPhaseInitialization(Plans);
   for (unsigned Round = 0; Round < Rounds; ++Round) {
     OS << "  /* lazyseq no-round-robin round " << Round << " */\n";
     const std::string MainTemp = formatv("__cs_tmp_t0_r{0}", Round).str();
@@ -692,6 +721,7 @@ std::string buildContextBoundedScheduler(const std::vector<ThreadPlan> &Plans,
   };
 
   OS << "\nint main(void)\n{\n";
+  OS << buildTimerPhaseInitialization(Plans);
   OS << "  unsigned __cs_tid[" << Contexts << "];\n";
   OS << "  unsigned __cs_cs[" << Contexts << "];\n";
   OS << "  unsigned __cs_context;\n";
@@ -1006,9 +1036,16 @@ std::string buildDeferredTimerActivation(const ThreadPlan &Plan,
       continue;
     const unsigned TriggerPeriod = Candidate.Period + Candidate.Constraint;
     OS << "\n__cs_timer_counter[" << Candidate.Index << "]++;\n";
-    OS << "if (__cs_timer_counter[" << Candidate.Index << "] >= "
+    OS << "if (__cs_timer_counter[" << Candidate.Index << "] == "
        << TriggerPeriod << ") {\n";
-    OS << "  __cs_timer_counter[" << Candidate.Index << "] = 0;\n";
+    if (Candidate.Constraint == 0)
+      OS << "  __cs_timer_counter[" << Candidate.Index << "] = 0;\n";
+    else {
+      OS << "  __cs_timer_counter[" << Candidate.Index
+         << "] = (unsigned)nondet_int();\n";
+      OS << "  __VERIFIER_assume(__cs_timer_counter[" << Candidate.Index
+         << "] <= " << 2 * Candidate.Constraint << ");\n";
+    }
     for (const ThreadPlan &Instance : Plans) {
       if (Instance.Kind != "timer" || baseThreadName(Instance.Name) != Family)
         continue;
