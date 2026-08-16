@@ -554,7 +554,7 @@ java -version
 
 1. `lazyseq` 已迁移可重解析的调度、PC 切片和基础 pthread 运行时，但尚未等价覆盖 Python 的完整 `lazyseqB.c`、事件/定时中断和全部调度变体。
 2. `instrumenter` 已覆盖 rawline 物化、CBMC 基础符号映射和 lazy 控制变量位宽；Python 中单变量访问序、事件/定时器和完整头文件拼接仍待迁移。
-3. `mapper` 已支持 `--backend=cbmc-ext --contexts>0 --cores=2^n`：生成 DIMACS，映射 `__cs_thread_index` 的命题位，并由 feeder 验证全部分片。当前分片按顺序执行，尚未迁移 Python feeder 的多进程并发调度；可用 `--reuse-dimacs` 复用同名 DIMACS 文件。
+3. `mapper` 已支持 `--backend=cbmc-ext --contexts>0 --cores=2^n`：生成 DIMACS，按 Python `mapper.py` 的规则映射 `__cs_tid` 各 context 槽的最低命题位，并由 feeder 验证全部分片。当前分片按顺序执行，尚未迁移 Python feeder 的多进程并发调度；可用 `--reuse-dimacs` 复用同名 DIMACS 文件。
 4. `cex` 已接收并报告 CBMC 原始轨迹；旧 Python 的源码行映射与 SV-COMP witness 生成尚待迁移。
 
 ### 2026-08：pthread 条件变量与屏障 runtime
