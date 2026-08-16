@@ -218,6 +218,12 @@ unsigned statementEndOffset(StringRef Source, unsigned Start) {
 class RwrAccessCollector
     : public RecursiveASTVisitor<RwrAccessCollector> {
 public:
+  struct Access {
+    unsigned Begin = 0;
+    unsigned End = 0;
+    std::string Function;
+  };
+
   RwrAccessCollector(const PipelineContext &Context, StringRef Source,
                      StringRef Variable)
       : Context(Context), Source(Source), Variable(Variable),
@@ -248,20 +254,45 @@ public:
     const unsigned Position =
         statementEndOffset(Source, sourceOffset(SourceMgr, Reference->getEndLoc()));
     if (Position != 0)
-      ReadCandidates.emplace_back(sourceOffset(SourceMgr, Reference->getBeginLoc()),
-                                  Position);
+      ReadCandidates.push_back(
+          {sourceOffset(SourceMgr, Reference->getBeginLoc()), Position,
+           CurrentFunction});
     return true;
+  }
+
+  bool TraverseFunctionDecl(FunctionDecl *Function) {
+    const std::string PreviousFunction = CurrentFunction;
+    if (Function->hasBody()) {
+      CurrentFunction = Function->getNameAsString();
+      const unsigned Begin =
+          sourceOffset(SourceMgr, Function->getBody()->getBeginLoc());
+      const unsigned End = sourceOffset(SourceMgr, Function->getBody()->getEndLoc());
+      StringRef Body = Source.slice(Begin, std::min<unsigned>(End + 1, Source.size()));
+      const size_t Marker = Body.find("__CS_LAZY_IF(");
+      if (Marker != StringRef::npos) {
+        StringRef Arguments = Body.drop_front(Marker + strlen("__CS_LAZY_IF("));
+        const size_t Comma = Arguments.find(',');
+        unsigned Index = 0;
+        if (Comma != StringRef::npos &&
+            !Arguments.take_front(Comma).trim().getAsInteger(10, Index))
+          FunctionIndices[CurrentFunction] = Index;
+      }
+    }
+    const bool Completed =
+        RecursiveASTVisitor<RwrAccessCollector>::TraverseFunctionDecl(Function);
+    CurrentFunction = PreviousFunction;
+    return Completed;
   }
 
   std::vector<unsigned> readEnds() const {
     std::set<unsigned> Ends;
-    for (const auto &[Begin, End] : ReadCandidates) {
+    for (const Access &Read : ReadCandidates) {
       const bool IsWriteLValue = std::any_of(
-          WriteRanges.begin(), WriteRanges.end(), [&](const auto &Range) {
-            return Begin >= Range.first && Begin < Range.second;
+          WriteRanges.begin(), WriteRanges.end(), [&](const Access &Range) {
+            return Read.Begin >= Range.Begin && Read.Begin < Range.End;
           });
-      if (!IsWriteLValue && WriteEnds.find(End) == WriteEnds.end())
-        Ends.insert(End);
+      if (!IsWriteLValue && WriteEnds.find(Read.End) == WriteEnds.end())
+        Ends.insert(Read.End);
     }
     return std::vector<unsigned>(Ends.begin(), Ends.end());
   }
@@ -270,10 +301,15 @@ public:
   std::vector<unsigned> writeBegins() const {
     std::set<unsigned> Begins;
     for (const auto &Range : WriteRanges)
-      Begins.insert(Range.first);
+      Begins.insert(Range.Begin);
     return std::vector<unsigned>(Begins.begin(), Begins.end());
   }
   StringRef type() const { return Type; }
+  const std::vector<Access> &reads() const { return ReadCandidates; }
+  const std::vector<Access> &writes() const { return WriteRanges; }
+  const std::map<std::string, unsigned> &functionIndices() const {
+    return FunctionIndices;
+  }
 
 private:
   bool isTargetLValue(const Expr *Expression) const {
@@ -289,7 +325,7 @@ private:
   void recordWrite(const Expr *LValue, SourceLocation EndLocation) {
     const unsigned Begin = sourceOffset(SourceMgr, LValue->getBeginLoc());
     const unsigned End = sourceOffset(SourceMgr, LValue->getEndLoc());
-    WriteRanges.emplace_back(Begin, End);
+    WriteRanges.push_back({Begin, End, CurrentFunction});
     const unsigned StatementEnd = statementEndOffset(
         Source, sourceOffset(SourceMgr, EndLocation));
     if (StatementEnd != 0)
@@ -301,9 +337,11 @@ private:
   StringRef Variable;
   const SourceManager &SourceMgr;
   std::string Type;
-  std::vector<std::pair<unsigned, unsigned>> WriteRanges;
-  std::vector<std::pair<unsigned, unsigned>> ReadCandidates;
+  std::string CurrentFunction;
+  std::vector<Access> WriteRanges;
+  std::vector<Access> ReadCandidates;
   std::set<unsigned> WriteEnds;
+  std::map<std::string, unsigned> FunctionIndices;
 };
 
 struct RwrInstrumentation {
